@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Large Premiere template/media workspace
+Copied_28/
+Copied_28.8.rar
+
+# Generated XML files
+output/
