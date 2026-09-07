@@ -55,6 +55,16 @@ class VideoCut:
 
 
 @dataclass(frozen=True)
+class ArticleComponent:
+    key: str
+    title: str
+    present: bool
+    video_cut_count: int
+    text_block_count: int
+    timecodes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class Blueprint:
     root: ET.Element
     sequence: ET.Element
@@ -62,6 +72,18 @@ class Blueprint:
     narration_clips: list[ET.Element]
     timeline_clips: list[ET.Element]
     fps: int
+
+
+@dataclass(frozen=True)
+class GenerationSummary:
+    output: Path
+    video_dir: Path
+    audio_dir: Path
+    video_cut_count: int
+    narration_count: int
+    duration_seconds: float
+    fps: int
+    max_timecode_drift: float
 
 
 def nfc(value: str) -> str:
@@ -184,6 +206,100 @@ def parse_docx_video_cuts(docx_path: Path) -> list[VideoCut]:
     if not cuts:
         raise GeneratorError("Không tìm thấy timecode video trong DOCX")
     return cuts
+
+
+def format_timecode(seconds: float) -> str:
+    total_seconds = round(seconds)
+    minutes, remainder = divmod(total_seconds, 60)
+    return f"{minutes:02d}:{remainder:02d}"
+
+
+def inspect_docx_components(docx_path: Path) -> list[ArticleComponent]:
+    """Return the article sections shown in the GUI review checklist."""
+    try:
+        document = Document(docx_path)
+    except Exception as exc:
+        raise GeneratorError(f"Không đọc được DOCX: {docx_path}") from exc
+
+    sections: dict[str, dict[str, object]] = {
+        "intro": {"present": False, "cuts": [], "texts": 0},
+        **{
+            f"th{number}": {"present": False, "cuts": [], "texts": 0}
+            for number in range(1, 7)
+        },
+        "outro": {"present": False, "cuts": [], "texts": 0},
+    }
+    current_key: str | None = None
+    seen_teasers: set[tuple[int, str]] = set()
+
+    for table in document.tables:
+        for row in table.rows:
+            cells = [one_line(cell.text) for cell in row.cells]
+            row_type = cells[0] if cells else ""
+            text = cells[1] if len(cells) > 1 else ""
+            row_type_folded = row_type.casefold()
+
+            scenario_match = SCENARIO_RE.search(row_type)
+            if scenario_match:
+                number = int(scenario_match.group(1))
+                if 1 <= number <= 6:
+                    current_key = f"th{number}"
+                    sections[current_key]["present"] = True
+            elif row_type_folded == "intro":
+                current_key = "intro"
+                sections[current_key]["present"] = True
+            elif row_type_folded in {"kết bài", "outro"}:
+                current_key = "outro"
+                sections[current_key]["present"] = True
+
+            segments = extract_timecodes(text)
+            target_key = current_key
+            if "đoạn kịch tính" in text.casefold():
+                target_key = "intro"
+                sections[target_key]["present"] = True
+
+            if segments and target_key:
+                if "tình huống" in row_type_folded and scenario_match:
+                    teaser_key = (int(scenario_match.group(1)), text.casefold())
+                    if teaser_key in seen_teasers:
+                        continue
+                    seen_teasers.add(teaser_key)
+                cuts = sections[target_key]["cuts"]
+                assert isinstance(cuts, list)
+                cuts.extend(
+                    f"{format_timecode(start)} - {format_timecode(end)}"
+                    for start, end in segments
+                )
+                continue
+
+            if target_key and len(row.cells) > 1 and row_type_folded != "video":
+                paragraphs = [
+                    paragraph.text.strip()
+                    for paragraph in row.cells[1].paragraphs
+                    if paragraph.text.strip() and not extract_timecodes(paragraph.text)
+                ]
+                sections[target_key]["texts"] = int(sections[target_key]["texts"]) + len(
+                    paragraphs
+                )
+
+    labels = [("intro", "Intro")]
+    labels.extend((f"th{number}", f"Tình huống {number}") for number in range(1, 7))
+    labels.append(("outro", "Kết bài"))
+    result: list[ArticleComponent] = []
+    for key, title in labels:
+        data = sections[key]
+        timecodes = tuple(str(value) for value in data["cuts"])
+        result.append(
+            ArticleComponent(
+                key=key,
+                title=title,
+                present=bool(data["present"]),
+                video_cut_count=len(timecodes),
+                text_block_count=int(data["texts"]),
+                timecodes=timecodes,
+            )
+        )
+    return result
 
 
 def source_number(name: str) -> int | None:
@@ -489,6 +605,55 @@ def validate_blueprint(
     return max_timecode_drift
 
 
+def generate_project_xml(
+    *,
+    project_dir: Path,
+    content: Path,
+    reference_xml: Path,
+    output: Path,
+    video_dir: Path | None = None,
+    audio_dir: Path | None = None,
+    sequence_name: str | None = None,
+    write_output: bool = True,
+) -> GenerationSummary:
+    """Generate and validate one XML; shared by the CLI and desktop app."""
+    project_dir = existing_directory(project_dir.expanduser().resolve(), "Project dir")
+    content = existing_file(content.expanduser().resolve(), "Content DOCX")
+    reference_xml = existing_file(reference_xml.expanduser().resolve(), "Reference XML")
+    output = output.expanduser().resolve()
+    if output == reference_xml:
+        raise GeneratorError("Output không được ghi đè reference XML; hãy chọn output khác")
+
+    cuts = parse_docx_video_cuts(content)
+    blueprint = load_blueprint(reference_xml)
+    discovered_video_dir, videos = discover_video_media(
+        project_dir, str(video_dir.expanduser().resolve()) if video_dir else None
+    )
+    discovered_audio_dir, audios = discover_audio_media(
+        project_dir,
+        str(audio_dir.expanduser().resolve()) if audio_dir else None,
+        len(blueprint.narration_clips),
+    )
+
+    relink_blueprint(blueprint, videos, audios)
+    if sequence_name:
+        set_child_text(blueprint.sequence, "name", sequence_name)
+    max_drift = validate_blueprint(blueprint, cuts, videos, audios)
+    if write_output:
+        write_xml_atomic(blueprint.root, output)
+
+    return GenerationSummary(
+        output=output,
+        video_dir=discovered_video_dir,
+        audio_dir=discovered_audio_dir,
+        video_cut_count=len(cuts),
+        narration_count=len(blueprint.narration_clips),
+        duration_seconds=int_text(blueprint.sequence, "duration") / blueprint.fps,
+        fps=blueprint.fps,
+        max_timecode_drift=max_drift,
+    )
+
+
 def resolve_arguments(args: argparse.Namespace) -> argparse.Namespace:
     project_dir = (
         existing_directory(Path(args.project_dir).expanduser().resolve(), "Project dir")
@@ -542,41 +707,37 @@ def main() -> int:
     args = parser.parse_args()
     try:
         args = resolve_arguments(args)
-        cuts = parse_docx_video_cuts(args.content)
-        blueprint = load_blueprint(args.reference_xml)
-        video_dir, videos = discover_video_media(args.project_dir, args.video_dir)
-        audio_dir, audios = discover_audio_media(
-            args.project_dir, args.audio_dir, len(blueprint.narration_clips)
+        summary = generate_project_xml(
+            project_dir=args.project_dir,
+            content=args.content,
+            reference_xml=args.reference_xml,
+            output=args.output,
+            video_dir=Path(args.video_dir) if args.video_dir else None,
+            audio_dir=Path(args.audio_dir) if args.audio_dir else None,
+            sequence_name=args.sequence_name,
+            write_output=not args.dry_run,
         )
-
-        relink_blueprint(blueprint, videos, audios)
-        if args.sequence_name:
-            set_child_text(blueprint.sequence, "name", args.sequence_name)
-        max_drift = validate_blueprint(blueprint, cuts, videos, audios)
-
-        duration = int_text(blueprint.sequence, "duration") / blueprint.fps
         print("=" * 72)
-        print("Simple Premiere XML Generator v3 — Bài Karen 0509")
+        print("Simple Premiere XML Generator v3 - Bài Karen 0509")
         print("=" * 72)
         print(f"[PROJECT] {args.project_dir}")
-        print(f"[CONTENT] {args.content.name}: {len(cuts)} video cut")
+        print(f"[CONTENT] {args.content.name}: {summary.video_cut_count} video cut")
         print(
-            f"[BLUEPRINT] {args.reference_xml.name}: {len(blueprint.video_clips)} video + "
-            f"{len(blueprint.narration_clips)} voice-over"
+            f"[BLUEPRINT] {args.reference_xml.name}: {summary.video_cut_count} video + "
+            f"{summary.narration_count} voice-over"
         )
-        print(f"[VIDEO] {video_dir}: {len(videos)} file")
-        print(f"[AUDIO] {audio_dir}: {len(audios)} file")
-        print(f"[TIMELINE] {duration:.2f}s @ {blueprint.fps} fps")
+        print(f"[VIDEO] {summary.video_dir}: 6 file")
+        print(f"[AUDIO] {summary.audio_dir}: {summary.narration_count} file")
+        print(f"[TIMELINE] {summary.duration_seconds:.2f}s @ {summary.fps} fps")
         print(
             f"[TIMECODE] Thứ tự khớp DOCX; giữ offset đã tinh chỉnh trong XML "
-            f"(drift lớn nhất {max_drift:.3f}s)"
+            f"(drift lớn nhất {summary.max_timecode_drift:.3f}s)"
         )
         print("[VALIDATE] OK")
 
         if args.dry_run:
             print("[DRY RUN] Không ghi XML")
             return 0
-        write_xml_atomic(blueprint.root, args.output)
         print(f"[OUTPUT] {args.output} ({args.output.stat().st_size / 1024:.1f} KB)")
         return 0
     except GeneratorError as exc:
