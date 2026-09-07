@@ -15,20 +15,17 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
+from generate_simple_xml import SimpleGenerationSummary, generate_simple_project_xml
 from generate_simple_xml_v3 import (
     ArticleComponent,
     DEFAULT_CONTENT_NAME,
-    DEFAULT_XML_NAME,
     GeneratorError,
-    GenerationSummary,
-    discover_audio_media,
     discover_video_media,
     find_named_child,
-    generate_project_xml,
     inspect_docx_components,
-    load_blueprint,
     resolve_default_project,
 )
+from generate_xml import AUDIO_EXTENSIONS
 
 
 @dataclass(frozen=True)
@@ -166,6 +163,38 @@ def component_is_ready(component: ArticleComponent) -> bool:
     if not component.present or component.text_block_count == 0:
         return False
     return component.key == "outro" or component.video_cut_count > 0
+
+
+def audio_file_count(directory: Path) -> int:
+    if not directory.is_dir():
+        return 0
+    return sum(
+        path.is_file()
+        and not path.name.startswith(".")
+        and path.suffix.casefold() in AUDIO_EXTENSIONS
+        for path in directory.iterdir()
+    )
+
+
+def discover_audio_directory(project_dir: Path) -> Path:
+    candidates = {
+        path.parent.resolve()
+        for path in project_dir.rglob("*")
+        if path.is_file()
+        and not path.name.startswith(".")
+        and path.suffix.casefold() in AUDIO_EXTENSIONS
+        and "Adobe Premiere Pro Auto-Save" not in path.parts
+    }
+    if not candidates:
+        raise GeneratorError("Không tự tìm thấy thư mục audio trong project")
+    return min(
+        candidates,
+        key=lambda path: (
+            -audio_file_count(path),
+            len(path.relative_to(project_dir).parts),
+            str(path).casefold(),
+        ),
+    )
 
 
 class Tooltip:
@@ -845,7 +874,6 @@ class XmlGeneratorApp:
 
         self.project_var = tk.StringVar()
         self.content_var = tk.StringVar()
-        self.xml_var = tk.StringVar()
         self.video_var = tk.StringVar()
         self.audio_var = tk.StringVar()
         self.output_var = tk.StringVar()
@@ -879,7 +907,6 @@ class XmlGeneratorApp:
         for variable in (
             self.project_var,
             self.content_var,
-            self.xml_var,
             self.video_var,
             self.audio_var,
             self.output_var,
@@ -1202,11 +1229,30 @@ class XmlGeneratorApp:
         )
         form.grid_columnconfigure(1, weight=1)
         fields = (
-            ("content", "Content DOCX", self.content_var, "file", self._browse_content, "Chứa cấu trúc và timecode bài."),
-            ("video", "Thư mục video", self.video_var, "folder", self._browse_video, "Chứa đúng video 1-6 hoặc TH1-TH6."),
-            ("audio", "Thư mục voice-over", self.audio_var, "folder", self._browse_audio, "Chứa đầy đủ file voice-over theo timeline của project."),
-            ("output", "File XML đầu ra", self.output_var, "output", self._browse_output, "Tạo file XML mới, không ghi đè XML gốc."),
-            ("sequence", "Tên sequence", self.sequence_var, "text", None, "Tên hiển thị trong Premiere Pro."),
+            (
+                "content",
+                "Content DOCX",
+                self.content_var,
+                "file",
+                self._browse_content,
+                "Chứa cấu trúc và timecode bài.",
+            ),
+            (
+                "video",
+                "Thư mục video",
+                self.video_var,
+                "folder",
+                self._browse_video,
+                "Chứa đúng video 1-6 hoặc TH1-TH6.",
+            ),
+            (
+                "audio",
+                "Thư mục voice-over",
+                self.audio_var,
+                "folder",
+                self._browse_audio,
+                "Toàn bộ file sẽ được đặt theo thứ tự tên.",
+            ),
         )
         for row_index, (key, label, variable, kind, command, helper) in enumerate(fields):
             self._build_field_row(
@@ -1368,15 +1414,17 @@ class XmlGeneratorApp:
     def _autofill_project(self, project_dir: Path, *, review: bool) -> None:
         try:
             content = find_named_child(project_dir, DEFAULT_CONTENT_NAME)
-            xml = find_named_child(project_dir, DEFAULT_XML_NAME)
-            if content is None or xml is None:
-                raise GeneratorError("Project phải có content.docx và Bài 0509.xml")
-            blueprint = load_blueprint(xml)
+            if content is None:
+                docx_files = sorted(
+                    project_dir.glob("*.docx"),
+                    key=lambda path: path.name.casefold(),
+                )
+                content = docx_files[0] if docx_files else None
+            if content is None:
+                raise GeneratorError("Project phải có một file content DOCX")
             video_dir, _videos = discover_video_media(project_dir, None)
-            audio_dir, _audios = discover_audio_media(
-                project_dir, None, len(blueprint.narration_clips)
-            )
-            output = xml.with_name(xml.stem + "_v3.xml")
+            audio_dir = discover_audio_directory(project_dir)
+            output = project_dir / "output_simple.xml"
         except GeneratorError as exc:
             self._show_error(str(exc))
             return
@@ -1387,10 +1435,10 @@ class XmlGeneratorApp:
             [
                 (self.project_var, project_dir),
                 (self.content_var, content),
-                (self.xml_var, xml),
                 (self.video_var, video_dir),
                 (self.audio_var, audio_dir),
                 (self.output_var, output),
+                (self.sequence_var, f"{project_dir.name} - Simple Cut"),
             ]
         )
         self.status_var.set("Đã nạp project, cần kiểm tra cấu trúc")
@@ -1413,7 +1461,15 @@ class XmlGeneratorApp:
             filetypes=(("Word document", "*.docx"), ("All files", "*.*")),
         )
         if selected:
-            self.content_var.set(path_text(selected))
+            content = Path(selected).resolve()
+            self._set_paths(
+                [
+                    (self.project_var, content.parent),
+                    (self.content_var, content),
+                    (self.output_var, content.parent / "output_simple.xml"),
+                    (self.sequence_var, f"{content.parent.name} - Simple Cut"),
+                ]
+            )
             self.root.after(50, self._review_content)
 
     def _browse_video(self) -> None:
@@ -1432,73 +1488,27 @@ class XmlGeneratorApp:
         if selected:
             self.audio_var.set(path_text(selected))
 
-    def _browse_output(self) -> None:
-        selected = filedialog.asksaveasfilename(
-            title="Chọn vị trí lưu XML",
-            initialdir=self.project_var.get() or str(Path.cwd()),
-            initialfile=(
-                Path(self.output_var.get()).name
-                if self.output_var.get()
-                else "output_v3.xml"
-            ),
-            defaultextension=".xml",
-            filetypes=(("XML", "*.xml"),),
-        )
-        if selected:
-            self.output_var.set(path_text(selected))
-
     def _validate_fields(self) -> dict[str, tuple[str, str]]:
         result: dict[str, tuple[str, str]] = {}
         specs = {
             "content": (self.content_var, "file", ".docx", "Content DOCX"),
-            "xml": (self.xml_var, "file", ".xml", "XML timeline tự động"),
             "video": (self.video_var, "directory", "", "Thư mục video"),
             "audio": (self.audio_var, "directory", "", "Thư mục voice-over"),
-            "output": (self.output_var, "output", ".xml", "File XML đầu ra"),
         }
         for key, (variable, kind, suffix, label) in specs.items():
             raw = variable.get().strip()
             if not raw:
-                if key == "xml":
-                    result[key] = (
-                        "error",
-                        f"Project phải có {DEFAULT_XML_NAME} để đọc timeline.",
-                    )
-                else:
-                    result[key] = ("empty", f"Chưa chọn {label.lower()}.")
+                result[key] = ("empty", f"Chưa chọn {label.lower()}.")
                 continue
             path = Path(raw).expanduser()
             if suffix and path.suffix.casefold() != suffix:
                 result[key] = ("error", f"{label} phải có đuôi {suffix}.")
             elif kind == "file" and not path.is_file():
-                result[key] = (
-                    "error",
-                    f"Project không có {DEFAULT_XML_NAME}: {path}"
-                    if key == "xml"
-                    else f"Không tìm thấy file: {path}",
-                )
+                result[key] = ("error", f"Không tìm thấy file: {path}")
             elif kind == "directory" and not path.is_dir():
                 result[key] = ("error", f"Không tìm thấy thư mục: {path}")
-            elif (
-                kind == "output"
-                and self.xml_var.get().strip()
-                and path.resolve() == Path(self.xml_var.get()).expanduser().resolve()
-            ):
-                result[key] = (
-                    "error",
-                    "File đầu ra không được ghi đè XML gốc.",
-                )
             else:
-                result[key] = (
-                    "valid",
-                    (
-                        "Vị trí lưu hợp lệ."
-                        if kind != "output" or path.parent.is_dir()
-                        else "Vị trí hợp lệ, thư mục sẽ được tạo khi xuất."
-                    )
-                    if kind == "output"
-                    else "Đã tìm thấy.",
-                )
+                result[key] = ("valid", "Đã tìm thấy.")
         return result
 
     def _update_field_states(self) -> None:
@@ -1534,10 +1544,8 @@ class XmlGeneratorApp:
             for variable in (
                 self.project_var,
                 self.content_var,
-                self.xml_var,
                 self.video_var,
                 self.audio_var,
-                self.output_var,
             )
         )
 
@@ -1663,15 +1671,13 @@ class XmlGeneratorApp:
         self.review_button.configure(text="Đang kiểm tra...", state="disabled")
         self._set_processing(True)
         self._log(f"Đang kiểm tra cấu trúc: {content_path}")
-        xml_path = Path(self.xml_var.get()).expanduser()
+        audio_path = Path(self.audio_var.get()).expanduser()
         self.root.after(40, self._poll_worker_results)
 
         def worker() -> None:
             try:
                 components = inspect_docx_components(content_path)
-                voiceovers = 0
-                if xml_path.is_file():
-                    voiceovers = len(load_blueprint(xml_path).narration_clips)
+                voiceovers = audio_file_count(audio_path)
             except Exception as exc:
                 self._worker_results.put(("review_error", exc))
                 return
@@ -1885,7 +1891,6 @@ class XmlGeneratorApp:
         snapshot = {
             "project_dir": Path(self.project_var.get()).expanduser().resolve(),
             "content": Path(self.content_var.get()).expanduser().resolve(),
-            "reference_xml": Path(self.xml_var.get()).expanduser().resolve(),
             "video_dir": Path(self.video_var.get()).expanduser().resolve(),
             "audio_dir": Path(self.audio_var.get()).expanduser().resolve(),
             "output": Path(self.output_var.get()).expanduser().resolve(),
@@ -1903,7 +1908,7 @@ class XmlGeneratorApp:
 
         def worker() -> None:
             try:
-                summary = generate_project_xml(**snapshot)
+                summary = generate_simple_project_xml(**snapshot)
             except Exception as exc:
                 self._worker_results.put(("generation_error", exc))
                 return
@@ -1931,7 +1936,7 @@ class XmlGeneratorApp:
         if not handled and (self.is_running or self.is_review_loading):
             self.root.after(40, self._poll_worker_results)
 
-    def _generation_succeeded(self, summary: GenerationSummary) -> None:
+    def _generation_succeeded(self, summary: SimpleGenerationSummary) -> None:
         self.is_running = False
         self.generation_success = True
         self.generation_error = False
@@ -1944,7 +1949,7 @@ class XmlGeneratorApp:
             "success",
         )
         self._log(
-            f"Đã tự xóa {summary.removed_blur_effect_count} hiệu ứng làm mờ khỏi video.",
+            "XML sạch: không có blueprint, blur, filter, overlay hoặc transition.",
             "success",
         )
         self._log(f"Output: {summary.output}", "success")
