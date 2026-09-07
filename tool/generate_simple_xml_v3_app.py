@@ -1203,10 +1203,9 @@ class XmlGeneratorApp:
         form.grid_columnconfigure(1, weight=1)
         fields = (
             ("content", "Content DOCX", self.content_var, "file", self._browse_content, "Chứa cấu trúc và timecode bài."),
-            ("xml", "XML Blueprint", self.xml_var, "file", self._browse_xml, "Mẫu timeline và voice-over hiện có."),
             ("video", "Thư mục video", self.video_var, "folder", self._browse_video, "Chứa đúng video 1-6 hoặc TH1-TH6."),
-            ("audio", "Thư mục voice-over", self.audio_var, "folder", self._browse_audio, "Chứa đầy đủ file voice-over theo blueprint."),
-            ("output", "File XML đầu ra", self.output_var, "output", self._browse_output, "Không ghi đè XML Blueprint."),
+            ("audio", "Thư mục voice-over", self.audio_var, "folder", self._browse_audio, "Chứa đầy đủ file voice-over theo timeline của project."),
+            ("output", "File XML đầu ra", self.output_var, "output", self._browse_output, "Tạo file XML mới, không ghi đè XML gốc."),
             ("sequence", "Tên sequence", self.sequence_var, "text", None, "Tên hiển thị trong Premiere Pro."),
         )
         for row_index, (key, label, variable, kind, command, helper) in enumerate(fields):
@@ -1417,15 +1416,6 @@ class XmlGeneratorApp:
             self.content_var.set(path_text(selected))
             self.root.after(50, self._review_content)
 
-    def _browse_xml(self) -> None:
-        selected = filedialog.askopenfilename(
-            title="Chọn XML blueprint",
-            initialdir=self.project_var.get() or str(Path.cwd()),
-            filetypes=(("XML", "*.xml"), ("All files", "*.*")),
-        )
-        if selected:
-            self.xml_var.set(path_text(selected))
-
     def _browse_video(self) -> None:
         selected = filedialog.askdirectory(
             title="Chọn thư mục video",
@@ -1461,7 +1451,7 @@ class XmlGeneratorApp:
         result: dict[str, tuple[str, str]] = {}
         specs = {
             "content": (self.content_var, "file", ".docx", "Content DOCX"),
-            "xml": (self.xml_var, "file", ".xml", "XML Blueprint"),
+            "xml": (self.xml_var, "file", ".xml", "XML timeline tự động"),
             "video": (self.video_var, "directory", "", "Thư mục video"),
             "audio": (self.audio_var, "directory", "", "Thư mục voice-over"),
             "output": (self.output_var, "output", ".xml", "File XML đầu ra"),
@@ -1469,13 +1459,24 @@ class XmlGeneratorApp:
         for key, (variable, kind, suffix, label) in specs.items():
             raw = variable.get().strip()
             if not raw:
-                result[key] = ("empty", f"Chưa chọn {label.lower()}.")
+                if key == "xml":
+                    result[key] = (
+                        "error",
+                        f"Project phải có {DEFAULT_XML_NAME} để đọc timeline.",
+                    )
+                else:
+                    result[key] = ("empty", f"Chưa chọn {label.lower()}.")
                 continue
             path = Path(raw).expanduser()
             if suffix and path.suffix.casefold() != suffix:
                 result[key] = ("error", f"{label} phải có đuôi {suffix}.")
             elif kind == "file" and not path.is_file():
-                result[key] = ("error", f"Không tìm thấy file: {path}")
+                result[key] = (
+                    "error",
+                    f"Project không có {DEFAULT_XML_NAME}: {path}"
+                    if key == "xml"
+                    else f"Không tìm thấy file: {path}",
+                )
             elif kind == "directory" and not path.is_dir():
                 result[key] = ("error", f"Không tìm thấy thư mục: {path}")
             elif (
@@ -1485,7 +1486,7 @@ class XmlGeneratorApp:
             ):
                 result[key] = (
                     "error",
-                    "File đầu ra không được ghi đè XML Blueprint.",
+                    "File đầu ra không được ghi đè XML gốc.",
                 )
             else:
                 result[key] = (
@@ -1940,6 +1941,10 @@ class XmlGeneratorApp:
         self._log(
             f"Hoàn tất: {summary.video_cut_count} video cut, "
             f"{summary.narration_count} voice-over, {summary.duration_seconds:.2f}s",
+            "success",
+        )
+        self._log(
+            f"Đã tự xóa {summary.removed_blur_effect_count} hiệu ứng làm mờ khỏi video.",
             "success",
         )
         self._log(f"Output: {summary.output}", "success")

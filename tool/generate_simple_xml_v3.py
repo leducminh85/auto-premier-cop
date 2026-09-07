@@ -84,6 +84,7 @@ class GenerationSummary:
     duration_seconds: float
     fps: int
     max_timecode_drift: float
+    removed_blur_effect_count: int = 0
 
 
 def nfc(value: str) -> str:
@@ -516,6 +517,65 @@ def relink_blueprint(
             set_child_text(related_clip, "name", media_path.name)
 
 
+def remove_video_blur_effects(blueprint: Blueprint) -> int:
+    """Remove blur filters inherited from the reference timeline's video clips."""
+    removed = 0
+    video_clips = blueprint.sequence.findall("./media/video/track/clipitem")
+    for clip in video_clips:
+        for filter_element in list(clip.findall("filter")):
+            effect = filter_element.find("effect")
+            if effect is None:
+                continue
+            identifiers = (
+                effect.findtext("effectid") or "",
+                effect.findtext("name") or "",
+                effect.findtext("effectcategory") or "",
+            )
+            if any("blur" in value.casefold() for value in identifiers):
+                clip.remove(filter_element)
+                removed += 1
+    return removed
+
+
+def video_blur_effects(blueprint: Blueprint) -> list[str]:
+    result: list[str] = []
+    video_clips = blueprint.sequence.findall("./media/video/track/clipitem")
+    for clip in video_clips:
+        for effect in clip.findall("./filter/effect"):
+            identifiers = (
+                effect.findtext("effectid") or "",
+                effect.findtext("name") or "",
+                effect.findtext("effectcategory") or "",
+            )
+            if any("blur" in value.casefold() for value in identifiers):
+                result.append(
+                    effect.findtext("effectid") or effect.findtext("name") or "Blur"
+                )
+    return result
+
+
+def validate_written_xml(
+    output: Path, expected_video_count: int, expected_narration_count: int
+) -> None:
+    """Parse the written file again and verify its critical output invariants."""
+    written = load_blueprint(output)
+    if len(written.video_clips) != expected_video_count:
+        raise GeneratorError(
+            f"XML đã ghi có {len(written.video_clips)} video cut; "
+            f"cần {expected_video_count}"
+        )
+    if len(written.narration_clips) != expected_narration_count:
+        raise GeneratorError(
+            f"XML đã ghi có {len(written.narration_clips)} voice-over; "
+            f"cần {expected_narration_count}"
+        )
+    remaining_blurs = video_blur_effects(written)
+    if remaining_blurs:
+        raise GeneratorError(
+            f"XML đã ghi vẫn còn {len(remaining_blurs)} hiệu ứng làm mờ trên video"
+        )
+
+
 def validate_blueprint(
     blueprint: Blueprint,
     cuts: list[VideoCut],
@@ -636,11 +696,13 @@ def generate_project_xml(
     )
 
     relink_blueprint(blueprint, videos, audios)
+    removed_blur_effect_count = remove_video_blur_effects(blueprint)
     if sequence_name:
         set_child_text(blueprint.sequence, "name", sequence_name)
     max_drift = validate_blueprint(blueprint, cuts, videos, audios)
     if write_output:
         write_xml_atomic(blueprint.root, output)
+        validate_written_xml(output, len(cuts), len(blueprint.narration_clips))
 
     return GenerationSummary(
         output=output,
@@ -651,6 +713,7 @@ def generate_project_xml(
         duration_seconds=int_text(blueprint.sequence, "duration") / blueprint.fps,
         fps=blueprint.fps,
         max_timecode_drift=max_drift,
+        removed_blur_effect_count=removed_blur_effect_count,
     )
 
 
@@ -732,6 +795,10 @@ def main() -> int:
         print(
             f"[TIMECODE] Thứ tự khớp DOCX; giữ offset đã tinh chỉnh trong XML "
             f"(drift lớn nhất {summary.max_timecode_drift:.3f}s)"
+        )
+        print(
+            f"[CLEANUP] Đã xóa {summary.removed_blur_effect_count} "
+            "hiệu ứng làm mờ khỏi video"
         )
         print("[VALIDATE] OK")
 
