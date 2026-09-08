@@ -71,7 +71,7 @@ from generate_simple_xml_v3 import (
     inspect_docx_components,
     resolve_default_project,
 )
-from generate_xml import AUDIO_EXTENSIONS
+from generate_xml import AUDIO_EXTENSIONS, hidden_subprocess_options
 
 
 @dataclass(frozen=True)
@@ -2330,9 +2330,26 @@ class XmlGeneratorApp(QMainWindow):
                 subprocess.Popen(command)
             elif os.name == "nt":
                 if path.is_file():
-                    subprocess.Popen(["explorer", f"/select,{path}"])
+                    # Explorer expects the select switch and a quoted path as
+                    # separate command-line arguments. Combining them causes
+                    # paths containing spaces to be quoted as a whole
+                    # ("/select,C:\\Some Folder\\file.xml"), which Explorer
+                    # does not parse reliably.
+                    subprocess.Popen(
+                        [
+                            "explorer.exe",
+                            "/select,",
+                            os.path.normpath(str(path.resolve())),
+                        ],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        **hidden_subprocess_options(),
+                    )
                 else:
-                    os.startfile(str(target))  # type: ignore[attr-defined]
+                    os.startfile(  # type: ignore[attr-defined]
+                        os.path.normpath(str(target.resolve()))
+                    )
             else:
                 subprocess.Popen(["xdg-open", str(target)])
         except OSError as exc:
