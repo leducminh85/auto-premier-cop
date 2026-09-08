@@ -71,7 +71,7 @@ from generate_simple_xml_v3 import (
     inspect_docx_components,
     resolve_default_project,
 )
-from generate_xml import AUDIO_EXTENSIONS, hidden_subprocess_options
+from generate_xml import AUDIO_EXTENSIONS
 
 
 @dataclass(frozen=True)
@@ -97,13 +97,14 @@ class Theme:
 
 
 THEME = Theme()
-APP_NAME = "dumi cut room"
+APP_NAME = "Dumi Cut Room"
 IS_MACOS = sys.platform == "darwin"
+IS_WINDOWS = os.name == "nt"
 FILE_MANAGER = (
     "Finder"
     if IS_MACOS
     else "File Explorer"
-    if os.name == "nt"
+    if IS_WINDOWS
     else "trình quản lý tệp"
 )
 
@@ -2329,27 +2330,14 @@ class XmlGeneratorApp(QMainWindow):
                     else ["open", str(target)]
                 )
                 subprocess.Popen(command)
-            elif os.name == "nt":
-                if path.is_file():
-                    # Explorer expects the select switch and a quoted path as
-                    # separate command-line arguments. Combining them causes
-                    # paths containing spaces to be quoted as a whole
-                    # ("/select,C:\\Some Folder\\file.xml"), which Explorer
-                    # does not parse reliably.
-                    subprocess.Popen(
-                        [
-                            "explorer.exe",
-                            "/select,",
-                            os.path.normpath(str(path.resolve())),
-                        ],
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        **hidden_subprocess_options(),
-                    )
-                else:
-                    os.startfile(  # type: ignore[attr-defined]
-                        os.path.normpath(str(target.resolve()))
+            elif IS_WINDOWS:
+                directory = path.parent if path.is_file() else target
+                opened = QDesktopServices.openUrl(
+                    QUrl.fromLocalFile(str(directory.resolve()))
+                )
+                if not opened:
+                    raise OSError(
+                        f"Windows không mở được thư mục: {directory}"
                     )
             else:
                 subprocess.Popen(["xdg-open", str(target)])

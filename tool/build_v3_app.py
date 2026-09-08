@@ -20,10 +20,10 @@ LOGO_PATH = ASSET_DIR / "xmlcutroom-logo.png"
 
 def platform_build_settings() -> tuple[str, Path, str]:
     if sys.platform == "darwin":
-        return "dumi-cut-room-mac", ASSET_DIR / "xmlcutroom.icns", "--onedir"
+        return "Dumi Cut Room", ASSET_DIR / "xmlcutroom.icns", "--onedir"
     if os.name == "nt":
-        return "dumi-cut-room-win", ASSET_DIR / "xmlcutroom.ico", "--onefile"
-    return "dumi-cut-room-linux", LOGO_PATH, "--onefile"
+        return "Dumi Cut Room", ASSET_DIR / "xmlcutroom.ico", "--onefile"
+    return "Dumi Cut Room", LOGO_PATH, "--onefile"
 
 
 def find_ffprobe() -> Path:
