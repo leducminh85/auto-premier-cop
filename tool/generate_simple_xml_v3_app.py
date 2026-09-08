@@ -97,6 +97,7 @@ class Theme:
 
 
 THEME = Theme()
+APP_NAME = "dumi cut room"
 IS_MACOS = sys.platform == "darwin"
 FILE_MANAGER = (
     "Finder"
@@ -854,7 +855,7 @@ class WelcomePage(QWidget):
         title.setMinimumHeight(42)
         body = QLabel(
             "Chọn thư mục chứa content DOCX, video và voice-over. "
-            "XML Cut Room sẽ tự tìm các nguồn hiện có."
+            f"{APP_NAME} sẽ tự tìm các nguồn hiện có."
         )
         body.setProperty("role", "body")
         body.setWordWrap(True)
@@ -1322,7 +1323,7 @@ class Sidebar(QFrame):
             )
         else:
             logo_label.setPixmap(make_icon("grid", THEME.accent, 30).pixmap(38, 38))
-        brand_name = QLabel("XML Cut Room")
+        brand_name = QLabel(APP_NAME)
         brand_name.setStyleSheet(
             f"font-size: 16px; font-weight: 600; color: {THEME.text};"
         )
@@ -1548,7 +1549,7 @@ class Worker(QRunnable):
 class XmlGeneratorApp(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("XML Cut Room")
+        self.setWindowTitle(APP_NAME)
         self.resize(1280, 820)
         self.setMinimumSize(1024, 700)
         icon_path = bundled_asset("xmlcutroom-logo.png")
@@ -2404,8 +2405,8 @@ class XmlGeneratorApp(QMainWindow):
 
 def main() -> int:
     application = QApplication(sys.argv)
-    application.setApplicationName("XML Cut Room")
-    application.setOrganizationName("XML Cut Room")
+    application.setApplicationName(APP_NAME)
+    application.setOrganizationName(APP_NAME)
     application.setStyle("Fusion")
     apply_light_palette(application)
     system_font = QFontDatabase.systemFont(
