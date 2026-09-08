@@ -57,7 +57,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from generate_simple_xml import SimpleGenerationSummary, generate_simple_project_xml
+from generate_simple_xml import (
+    SimpleGenerationSummary,
+    generate_simple_project_xml,
+    tokens_from_transcript,
+)
 from generate_simple_xml_v3 import (
     ArticleComponent,
     DEFAULT_CONTENT_NAME,
@@ -528,6 +532,7 @@ class HeaderBlock(QWidget):
 
 class SourceCard(QFrame):
     chooseRequested = Signal(str)
+    clearRequested = Signal(str)
     copyRequested = Signal(str)
     openRequested = Signal(str)
 
@@ -537,10 +542,12 @@ class SourceCard(QFrame):
         icon: str,
         title: str,
         description: str,
+        optional: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.key = key
+        self.optional = optional
         self.current_path = ""
         self.setProperty("card", True)
         self.setMinimumHeight(178)
@@ -590,6 +597,11 @@ class SourceCard(QFrame):
         self.choose_button.clicked.connect(
             lambda: self.chooseRequested.emit(self.key)
         )
+        self.clear_button = QPushButton("Bỏ chọn")
+        self.clear_button.clicked.connect(
+            lambda: self.clearRequested.emit(self.key)
+        )
+        self.clear_button.hide()
         self.copy_button = QPushButton("Copy")
         self.copy_button.setIcon(make_icon("copy", THEME.secondary, 17))
         self.copy_button.clicked.connect(
@@ -601,6 +613,7 @@ class SourceCard(QFrame):
             lambda: self.openRequested.emit(self.current_path)
         )
         actions.addWidget(self.choose_button)
+        actions.addWidget(self.clear_button)
         actions.addStretch(1)
         actions.addWidget(self.copy_button)
         actions.addWidget(self.open_button)
@@ -613,16 +626,21 @@ class SourceCard(QFrame):
             self.path_label.setFullText(str(path))
             self.choose_button.setText("Thay đổi")
         else:
-            self.name_label.setFullText("Chưa chọn nguồn")
-            self.path_label.setFullText(
-                "Chọn thủ công hoặc đổi project để tự phát hiện."
+            self.name_label.setFullText(
+                "Không sử dụng" if self.optional else "Chưa chọn nguồn"
             )
-            self.choose_button.setText("Chọn nguồn")
+            self.path_label.setFullText(
+                ""
+                if self.optional
+                else "Chọn thủ công hoặc đổi project để tự phát hiện."
+            )
+            self.choose_button.setText("Chọn file" if self.optional else "Chọn nguồn")
 
         badge_text, badge_state = {
             "ready": ("Sẵn sàng", "ready"),
             "error": ("Cần xử lý", "error"),
             "warning": ("Chưa chọn", "warning"),
+            "optional": ("Tùy chọn", "neutral"),
         }.get(state, ("Chưa chọn", "neutral"))
         self.badge.setText(badge_text)
         self.badge.setProperty("badge", badge_state)
@@ -631,11 +649,13 @@ class SourceCard(QFrame):
         self.error_label.setVisible(bool(message) and state == "error")
         self.copy_button.setEnabled(bool(path))
         self.open_button.setEnabled(bool(path))
+        self.clear_button.setVisible(self.optional and bool(path))
 
     def setBusy(self, busy: bool) -> None:
         self.choose_button.setDisabled(busy)
         self.copy_button.setDisabled(busy or not self.current_path)
         self.open_button.setDisabled(busy or not self.current_path)
+        self.clear_button.setDisabled(busy or not self.current_path)
 
     def setCompact(self, compact: bool) -> None:
         if compact:
@@ -692,6 +712,7 @@ class ProjectSummaryCard(QFrame):
             ("content", "Content DOCX"),
             ("video", "Video nguồn"),
             ("audio", "File voice-over"),
+            ("transcript", "Transcript TXT"),
         ):
             row = QHBoxLayout()
             name = QLabel(label)
@@ -714,7 +735,7 @@ class ProjectSummaryCard(QFrame):
     ) -> None:
         self.project_name.setFullText(project.name if project else "Chưa có project")
         self.project_path.setFullText(str(project) if project else "")
-        for key in ("content", "video", "audio"):
+        for key in ("content", "video", "audio", "transcript"):
             state = states[key][0]
             if state == "ready":
                 if key == "video" and video_count:
@@ -724,6 +745,8 @@ class ProjectSummaryCard(QFrame):
                 else:
                     text = "Đã tìm thấy"
                 color = THEME.success
+            elif state == "optional":
+                text, color = "Không dùng", THEME.tertiary
             elif state == "error":
                 text, color = "Có lỗi", THEME.error
             else:
@@ -910,6 +933,13 @@ class SetupPage(QScrollArea):
                 "Thư mục voice-over",
                 "",
             ),
+            "transcript": SourceCard(
+                "transcript",
+                "file",
+                "Transcript TXT",
+                "",
+                optional=True,
+            ),
         }
         self.summary = ProjectSummaryCard()
         self.export = ExportSettingsCard()
@@ -940,15 +970,15 @@ class SetupPage(QScrollArea):
         if compact:
             for row, card in enumerate(cards):
                 self.grid.addWidget(card, row, 0)
-            self.grid.addWidget(self.summary, 3, 0)
-            self.grid.addWidget(self.export, 4, 0)
+            self.grid.addWidget(self.summary, len(cards), 0)
+            self.grid.addWidget(self.export, len(cards) + 1, 0)
             self.grid.setColumnStretch(0, 1)
             self.grid.setColumnStretch(1, 0)
         else:
             for row, card in enumerate(cards):
                 self.grid.addWidget(card, row, 0)
             self.grid.addWidget(self.summary, 0, 1)
-            self.grid.addWidget(self.export, 1, 1, 2, 1)
+            self.grid.addWidget(self.export, 1, 1, len(cards) - 1, 1)
             self.grid.setColumnStretch(0, 2)
             self.grid.setColumnStretch(1, 1)
 
@@ -1538,12 +1568,13 @@ class XmlGeneratorApp(QMainWindow):
         self.content_path: Path | None = None
         self.video_path: Path | None = None
         self.audio_path: Path | None = None
+        self.transcript_path: Path | None = None
         self.output_path: Path | None = None
         self.sequence_name = ""
         self.discovery_errors: dict[str, str] = {}
         self.video_count = 0
         self.voiceover_count = 0
-        self.verified_signature: tuple[str, str, str] | None = None
+        self.verified_signature: tuple[str, str, str, str] | None = None
         self.review_components: list[ArticleComponent] = []
         self.review_content: Path | None = None
         self.last_summary: SimpleGenerationSummary | None = None
@@ -1578,6 +1609,7 @@ class XmlGeneratorApp(QMainWindow):
         self.setup_page = SetupPage()
         for card in self.setup_page.source_cards.values():
             card.chooseRequested.connect(self._browse_source)
+            card.clearRequested.connect(self._clear_source)
             card.copyRequested.connect(self._copy_text)
             card.openRequested.connect(self._reveal_path)
         export = self.setup_page.export
@@ -1758,6 +1790,7 @@ class XmlGeneratorApp(QMainWindow):
             if isinstance(result.get("audio"), Path)
             else None
         )
+        self.transcript_path = None
         self.video_count = int(result.get("video_count", 0))
         self.voiceover_count = int(result.get("voiceover_count", 0))
         errors = result.get("errors", {})
@@ -1782,6 +1815,13 @@ class XmlGeneratorApp(QMainWindow):
                 initial,
                 "Word document (*.docx);;Tất cả file (*)",
             )
+        elif key == "transcript":
+            selected, _ = QFileDialog.getOpenFileName(
+                self,
+                "Chọn transcript TXT",
+                initial,
+                "Transcript (*.txt);;Tất cả file (*)",
+            )
         else:
             title = (
                 "Chọn thư mục video"
@@ -1799,9 +1839,21 @@ class XmlGeneratorApp(QMainWindow):
         elif key == "video":
             self.video_path = path
             self.video_count = 0
-        else:
+        elif key == "audio":
             self.audio_path = path
             self.voiceover_count = audio_file_count(path)
+        else:
+            self.transcript_path = path
+        self.last_error = ""
+        self.setup_page.showNotice("")
+        self._refresh_ui()
+
+    def _clear_source(self, key: str) -> None:
+        if self.busy_kind or key != "transcript":
+            return
+        self._invalidate_review()
+        self.transcript_path = None
+        self.discovery_errors.pop("transcript", None)
         self.last_error = ""
         self.setup_page.showNotice("")
         self._refresh_ui()
@@ -1831,13 +1883,14 @@ class XmlGeneratorApp(QMainWindow):
         self.sequence_name = value
         self._refresh_action_bar()
 
-    def _input_signature(self) -> tuple[str, str, str] | None:
+    def _input_signature(self) -> tuple[str, str, str, str] | None:
         if not (self.content_path and self.video_path and self.audio_path):
             return None
         return (
             normalized_path(self.content_path),
             normalized_path(self.video_path),
             normalized_path(self.audio_path),
+            normalized_path(self.transcript_path),
         )
 
     def _invalidate_review(self) -> None:
@@ -1855,9 +1908,13 @@ class XmlGeneratorApp(QMainWindow):
             "content": (self.content_path, "file", ".docx"),
             "video": (self.video_path, "directory", ""),
             "audio": (self.audio_path, "directory", ""),
+            "transcript": (self.transcript_path, "file", ".txt"),
         }
         for key, (path, kind, suffix) in specifications.items():
             if path is None:
+                if key == "transcript":
+                    states[key] = ("optional", "")
+                    continue
                 error = self.discovery_errors.get(key, "")
                 states[key] = ("error" if error else "warning", error)
             elif suffix and path.suffix.casefold() != suffix:
@@ -1871,8 +1928,15 @@ class XmlGeneratorApp(QMainWindow):
         return states
 
     def _all_sources_ready(self) -> bool:
-        return bool(self.project_path and self.project_path.is_dir()) and all(
-            state == "ready" for state, _ in self._field_states().values()
+        states = self._field_states()
+        return bool(
+            self.project_path
+            and self.project_path.is_dir()
+            and all(
+                states[key][0] == "ready"
+                for key in ("content", "video", "audio")
+            )
+            and states["transcript"][0] in {"ready", "optional"}
         )
 
     def _output_ready(self) -> bool:
@@ -1887,15 +1951,32 @@ class XmlGeneratorApp(QMainWindow):
             return
         content_snapshot = self.content_path
         audio_snapshot = self.audio_path
+        transcript_snapshot = self.transcript_path
         signature = self._input_signature()
         self._log(f"Đang kiểm tra cấu trúc: {content_snapshot}")
 
         def review() -> object:
+            voiceover_count = audio_file_count(audio_snapshot)
+            transcript_count = 0
+            transcript_confidence = 0.0
+            if transcript_snapshot is not None:
+                _tokens, placements = tokens_from_transcript(
+                    content_snapshot,
+                    transcript_snapshot,
+                    voiceover_count,
+                    60,
+                )
+                transcript_count = len(placements)
+                transcript_confidence = min(
+                    placement.confidence for placement in placements
+                )
             return {
                 "signature": signature,
                 "content": content_snapshot,
                 "components": inspect_docx_components(content_snapshot),
-                "voiceovers": audio_file_count(audio_snapshot),
+                "voiceovers": voiceover_count,
+                "transcripts": transcript_count,
+                "transcript_confidence": transcript_confidence,
             }
 
         self._run_worker("review", review, self._review_loaded)
@@ -1924,6 +2005,14 @@ class XmlGeneratorApp(QMainWindow):
             f"Đã đọc {len(self.review_components)} thành phần từ DOCX.",
             "success",
         )
+        transcript_count = int(result.get("transcripts", 0))
+        if transcript_count:
+            confidence = float(result.get("transcript_confidence", 0.0))
+            self._log(
+                f"Đã căn chỉnh {transcript_count} block transcript; "
+                f"độ khớp thấp nhất {confidence:.0%}.",
+                "success",
+            )
 
     def _review_selection_changed(self) -> None:
         selected, _total, _all_ready = (
@@ -1973,6 +2062,9 @@ class XmlGeneratorApp(QMainWindow):
             "content": self.content_path.resolve(),
             "video_dir": self.video_path.resolve(),
             "audio_dir": self.audio_path.resolve(),
+            "transcript": (
+                self.transcript_path.resolve() if self.transcript_path else None
+            ),
             "output": self.output_path.resolve(),
             "sequence_name": self.sequence_name.strip(),
         }
@@ -2044,6 +2136,7 @@ class XmlGeneratorApp(QMainWindow):
             "content": self.content_path,
             "video": self.video_path,
             "audio": self.audio_path,
+            "transcript": self.transcript_path,
         }
         for key, card in self.setup_page.source_cards.items():
             state, message = states[key]
@@ -2092,7 +2185,9 @@ class XmlGeneratorApp(QMainWindow):
             return "Cần chọn project"
         if any(state == "error" for state, _ in states.values()):
             return "Nguồn cần xử lý"
-        if not all(state == "ready" for state, _ in states.values()):
+        if not all(
+            states[key][0] == "ready" for key in ("content", "video", "audio")
+        ):
             return "Còn thiếu nguồn"
         if self.stage == Stage.SUCCESS:
             return "Đã xuất XML"
@@ -2106,7 +2201,9 @@ class XmlGeneratorApp(QMainWindow):
         if not self.project_path:
             return ["current", "pending", "pending", "pending"]
         source_error = any(state == "error" for state, _ in states.values())
-        source_ready = all(state == "ready" for state, _ in states.values())
+        source_ready = all(
+            states[key][0] == "ready" for key in ("content", "video", "audio")
+        ) and states["transcript"][0] in {"ready", "optional"}
         result = ["complete", "pending", "pending", "pending"]
         if not source_ready:
             result[1] = "error" if source_error else "current"
@@ -2193,10 +2290,10 @@ class XmlGeneratorApp(QMainWindow):
     def _blocked_reason(self) -> str:
         if not self.project_path:
             return "Chọn project để bắt đầu."
-        for state, message in self._field_states().values():
+        for key, (state, message) in self._field_states().items():
             if state == "error":
                 return message or "Có nguồn dữ liệu chưa hợp lệ."
-            if state != "ready":
+            if key != "transcript" and state != "ready":
                 return "Chọn đủ content, video và voice-over."
         return "Cần kiểm tra cấu trúc DOCX."
 

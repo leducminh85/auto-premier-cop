@@ -10,10 +10,12 @@ used.
 from __future__ import annotations
 
 import argparse
+import difflib
 import os
 import re
 import sys
 import tempfile
+import unicodedata
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +39,15 @@ from generate_xml import (
 
 SCENARIO_RE = re.compile(r"vào\s+tình\s+huống\s*(\d+)", re.IGNORECASE)
 VIDEO_NUMBER_RE = re.compile(r"vid(?:eo)?\s*(\d+)", re.IGNORECASE)
+TRANSCRIPT_TIMESTAMP_PATTERN = r"\d{1,2}:\d{2}:\d{2}[,.]\d{3}"
+TRANSCRIPT_BLOCK_RE = re.compile(
+    rf"(?ms)^[ \t]*(?P<index>\d+)[ \t]*\n"
+    rf"[ \t]*(?P<start>{TRANSCRIPT_TIMESTAMP_PATTERN})[ \t]*-->[ \t]*"
+    rf"(?P<end>{TRANSCRIPT_TIMESTAMP_PATTERN})[ \t]*\n"
+    rf"(?P<text>.*?)"
+    rf"(?=^[ \t]*\d+[ \t]*\n[ \t]*{TRANSCRIPT_TIMESTAMP_PATTERN}"
+    rf"[ \t]*-->|\Z)"
+)
 
 
 @dataclass(frozen=True)
@@ -46,6 +57,31 @@ class StreamDetails:
     sample_rate: int = 48000
     audio_channels: int = 1
     has_audio: bool = True
+
+
+@dataclass(frozen=True)
+class TranscriptBlock:
+    index: int
+    text: str
+    start_seconds: float
+    end_seconds: float
+
+
+@dataclass(frozen=True)
+class VideoAnchor:
+    word_position: int
+    document_order: int
+    location: str
+    token: ScriptToken
+
+
+@dataclass(frozen=True)
+class TranscriptPlacement:
+    block: TranscriptBlock
+    audio_index: int
+    word_start: int
+    word_end: int
+    confidence: float
 
 
 @dataclass(frozen=True)
@@ -259,6 +295,294 @@ def add_sequence_format(video_media: ET.Element, details: StreamDetails, fps: in
 
 def one_line(value: str) -> str:
     return " ".join(value.split())
+
+
+def timestamp_seconds(value: str) -> float:
+    hours, minutes, remainder = value.replace(",", ".").split(":")
+    seconds = float(remainder)
+    result = int(hours) * 3600 + int(minutes) * 60 + seconds
+    if int(minutes) >= 60 or seconds >= 60:
+        raise GeneratorError(f"Mốc thời gian transcript không hợp lệ: {value}")
+    return result
+
+
+def read_transcript_text(path: Path) -> str:
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise GeneratorError(f"Không đọc được transcript TXT: {path}") from exc
+    if payload.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            return payload.decode("utf-16")
+        except UnicodeDecodeError as exc:
+            raise GeneratorError(f"Transcript TXT không phải UTF-16 hợp lệ: {path}") from exc
+    try:
+        return payload.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            return payload.decode("cp1252")
+        except UnicodeDecodeError as exc:
+            raise GeneratorError(
+                f"Transcript TXT phải dùng UTF-8, UTF-16 hoặc Windows-1252: {path}"
+            ) from exc
+
+
+def parse_transcript_file(path: Path) -> list[TranscriptBlock]:
+    """Parse numbered SRT-style blocks, where one block represents one audio file."""
+    raw = read_transcript_text(path).replace("\r\n", "\n").replace("\r", "\n")
+    matches = list(TRANSCRIPT_BLOCK_RE.finditer(raw))
+    if not matches:
+        raise GeneratorError(
+            "Transcript không có block hợp lệ. Mỗi block cần gồm số thứ tự, "
+            "timecode và nội dung."
+        )
+
+    cursor = 0
+    blocks: list[TranscriptBlock] = []
+    for match in matches:
+        if raw[cursor : match.start()].strip():
+            raise GeneratorError(
+                f"Transcript có nội dung không thuộc block gần ký tự {cursor + 1}"
+            )
+        cursor = match.end()
+        index = int(match.group("index"))
+        text = one_line(match.group("text"))
+        if not text:
+            raise GeneratorError(f"Transcript block {index} không có nội dung")
+        start = timestamp_seconds(match.group("start"))
+        end = timestamp_seconds(match.group("end"))
+        if end <= start:
+            raise GeneratorError(f"Timecode transcript block {index} không hợp lệ")
+        blocks.append(TranscriptBlock(index, text, start, end))
+    if raw[cursor:].strip():
+        raise GeneratorError("Transcript có nội dung thừa sau block cuối")
+
+    indices = [block.index for block in blocks]
+    expected = list(range(1, len(blocks) + 1))
+    if indices != expected:
+        raise GeneratorError(
+            "Số thứ tự transcript phải liên tục từ 1; "
+            f"hiện nhận được: {', '.join(map(str, indices[:12]))}"
+        )
+    return blocks
+
+
+def normalized_words(value: str) -> list[str]:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    normalized = normalized.replace("’", "'").replace("‘", "'")
+    return re.findall(r"[^\W_]+", normalized, flags=re.UNICODE)
+
+
+def parse_content_anchors(
+    docx_path: Path, fps: int
+) -> tuple[list[str], list[VideoAnchor]]:
+    """Flatten narration to words while retaining every video's document position."""
+    try:
+        document = Document(docx_path)
+    except Exception as exc:
+        raise GeneratorError(f"Không đọc được DOCX: {docx_path}") from exc
+    if not document.tables:
+        raise GeneratorError("DOCX không có bảng nội dung")
+
+    words: list[str] = []
+    video_anchors: list[VideoAnchor] = []
+    current_scenario: int | None = None
+    content_started = False
+    seen_teasers: set[tuple[int, str]] = set()
+    document_order = 0
+
+    for table_index, table in enumerate(document.tables, 1):
+        for row_index, row in enumerate(table.rows, 1):
+            cells = [one_line(cell.text) for cell in row.cells]
+            row_type = cells[0] if cells else ""
+            text = cells[1] if len(cells) > 1 else ""
+            folded_type = row_type.casefold()
+            location = f"bảng {table_index}, dòng {row_index}"
+
+            scenario_match = SCENARIO_RE.search(row_type)
+            if scenario_match:
+                current_scenario = int(scenario_match.group(1))
+                content_started = True
+            elif folded_type in {"intro", "kết bài", "outro"}:
+                content_started = True
+
+            segments = extract_timecodes(text)
+            if segments:
+                source_number = current_scenario
+                if "đoạn kịch tính" in text.casefold():
+                    video_match = VIDEO_NUMBER_RE.search(text)
+                    source_number = int(video_match.group(1)) if video_match else None
+                if source_number is None or not 1 <= source_number <= 6:
+                    raise GeneratorError(f"Không xác định được video tại {location}")
+                if "tình huống" in folded_type:
+                    teaser_key = (source_number, text.casefold())
+                    if teaser_key in seen_teasers:
+                        continue
+                    seen_teasers.add(teaser_key)
+                for start, end in segments:
+                    video_anchors.append(
+                        VideoAnchor(
+                            word_position=len(words),
+                            document_order=document_order,
+                            location=location,
+                            token=ScriptToken(
+                                kind="video",
+                                th_number=source_number,
+                                source_in=round(start * fps),
+                                source_out=round(end * fps),
+                            ),
+                        )
+                    )
+                    document_order += 1
+                continue
+
+            if not content_started or len(row.cells) < 2 or folded_type == "video":
+                continue
+            for paragraph in row.cells[1].paragraphs:
+                narration = one_line(paragraph.text)
+                if narration and not extract_timecodes(narration):
+                    words.extend(normalized_words(narration))
+
+    if not words:
+        raise GeneratorError("Không tìm thấy nội dung để so khớp transcript trong DOCX")
+    if not video_anchors:
+        raise GeneratorError("Không tìm thấy timecode video trong DOCX")
+    return words, video_anchors
+
+
+def weighted_median(values: list[tuple[int, int]]) -> int:
+    ordered = sorted(values)
+    threshold = (sum(weight for _value, weight in ordered) + 1) // 2
+    accumulated = 0
+    for value, weight in ordered:
+        accumulated += weight
+        if accumulated >= threshold:
+            return value
+    return ordered[-1][0]
+
+
+def align_transcript_blocks(
+    content_words: list[str], blocks: list[TranscriptBlock]
+) -> list[TranscriptPlacement]:
+    block_words = [normalized_words(block.text) for block in blocks]
+    empty = [block.index for block, words in zip(blocks, block_words) if not words]
+    if empty:
+        raise GeneratorError(f"Transcript block {empty[0]} không có từ để so khớp")
+
+    transcript_words = [word for words in block_words for word in words]
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    for words in block_words:
+        ranges.append((cursor, cursor + len(words)))
+        cursor += len(words)
+
+    matches = [
+        match
+        for match in difflib.SequenceMatcher(
+            None, transcript_words, content_words, autojunk=False
+        ).get_matching_blocks()
+        if match.size
+    ]
+    placements: list[TranscriptPlacement] = []
+    previous_start = -1
+    for audio_index, (block, words, (block_start, block_end)) in enumerate(
+        zip(blocks, block_words, ranges, strict=True)
+    ):
+        start_estimates: list[tuple[int, int]] = []
+        matched_words = 0
+        matched_content_positions: list[tuple[int, int]] = []
+        for match in matches:
+            overlap_start = max(block_start, match.a)
+            overlap_end = min(block_end, match.a + match.size)
+            if overlap_end <= overlap_start:
+                continue
+            size = overlap_end - overlap_start
+            content_start = match.b + overlap_start - match.a
+            start_estimates.append(
+                (content_start - (overlap_start - block_start), size)
+            )
+            matched_content_positions.append((content_start, content_start + size))
+            matched_words += size
+
+        confidence = matched_words / len(words)
+        minimum_matches = min(
+            len(words), max(2, min(8, (len(words) + 3) // 4))
+        )
+        if matched_words < minimum_matches or confidence < 0.40:
+            preview = " ".join(words[:12])
+            raise GeneratorError(
+                f"Không xác định chắc chắn vị trí transcript block {block.index} "
+                f"({confidence:.0%} khớp): {preview!r}"
+            )
+
+        word_start = max(0, weighted_median(start_estimates))
+        matched_start = min(start for start, _end in matched_content_positions)
+        matched_end = max(end for _start, end in matched_content_positions)
+        word_end = max(word_start + 1, matched_end)
+        word_start = min(word_start, matched_start)
+        if word_start < previous_start:
+            raise GeneratorError(
+                f"Transcript block {block.index} bị đảo thứ tự so với block trước"
+            )
+        previous_start = word_start
+        placements.append(
+            TranscriptPlacement(
+                block=block,
+                audio_index=audio_index,
+                word_start=word_start,
+                word_end=word_end,
+                confidence=confidence,
+            )
+        )
+    return placements
+
+
+def tokens_from_transcript(
+    docx_path: Path,
+    transcript_path: Path,
+    audio_count: int,
+    fps: int,
+) -> tuple[list[ScriptToken], list[TranscriptPlacement]]:
+    blocks = parse_transcript_file(transcript_path)
+    if len(blocks) != audio_count:
+        raise GeneratorError(
+            f"Transcript có {len(blocks)} block nhưng thư mục voice-over có "
+            f"{audio_count} file. Mỗi block phải ứng với đúng một file audio."
+        )
+    content_words, video_anchors = parse_content_anchors(docx_path, fps)
+    placements = align_transcript_blocks(content_words, blocks)
+
+    for placement in placements:
+        crossed = next(
+            (
+                anchor
+                for anchor in video_anchors
+                if placement.word_start < anchor.word_position < placement.word_end
+            ),
+            None,
+        )
+        if crossed is not None:
+            raise GeneratorError(
+                f"Transcript block {placement.block.index} đi qua video cut tại "
+                f"{crossed.location}. Cần tách audio tại vị trí này."
+            )
+
+    ordered: list[tuple[int, int, int, ScriptToken]] = []
+    for anchor in video_anchors:
+        ordered.append(
+            (anchor.word_position, 0, anchor.document_order, anchor.token)
+        )
+    for placement in placements:
+        ordered.append(
+            (
+                placement.word_start,
+                1,
+                placement.audio_index,
+                ScriptToken(kind="audio", audio_index=placement.audio_index),
+            )
+        )
+    ordered.sort(key=lambda item: item[:3])
+    return [item[3] for item in ordered], placements
 
 
 def parse_ordered_script(
@@ -584,6 +908,7 @@ def generate_simple_project_xml(
     content: Path,
     video_dir: Path,
     audio_dir: Path,
+    transcript: Path | None = None,
     output: Path | None = None,
     sequence_name: str | None = None,
     fps: int = 60,
@@ -596,6 +921,11 @@ def generate_simple_project_xml(
     content = existing_file(content.expanduser().resolve(), "Content DOCX")
     video_dir = existing_directory(video_dir.expanduser().resolve(), "Video dir")
     audio_dir = existing_directory(audio_dir.expanduser().resolve(), "Audio dir")
+    transcript = (
+        existing_file(transcript.expanduser().resolve(), "Transcript TXT")
+        if transcript is not None
+        else None
+    )
     output = (
         output.expanduser().resolve()
         if output is not None
@@ -603,12 +933,20 @@ def generate_simple_project_xml(
     )
     sequence_name = sequence_name or f"{project_dir.name} - Simple Cut"
 
-    tokens, narration_lengths = parse_ordered_script(content, fps)
     videos, audios = discover_media(video_dir, audio_dir, fps)
     if set(videos) != set(range(1, 7)):
         found = ", ".join(f"TH{number}" for number in sorted(videos)) or "không có"
         raise GeneratorError(f"Cần đúng video TH1-TH6; hiện tìm thấy: {found}")
-    tokens = rebalance_narration_tokens(tokens, narration_lengths, len(audios))
+    if transcript is not None:
+        audios = sorted(audios, key=lambda media: natural_sort_key(media.path.name))
+        tokens, placements = tokens_from_transcript(
+            content, transcript, len(audios), fps
+        )
+        narration_block_count = len(placements)
+    else:
+        tokens, narration_lengths = parse_ordered_script(content, fps)
+        tokens = rebalance_narration_tokens(tokens, narration_lengths, len(audios))
+        narration_block_count = len(narration_lengths)
 
     for token in tokens:
         if token.kind != "video" or token.th_number is None:
@@ -637,7 +975,7 @@ def generate_simple_project_xml(
         source_file_count=expected["source_files"],
         video_clip_count=expected["video_clips"],
         audio_clip_count=expected["audio_clips"],
-        narration_block_count=len(narration_lengths),
+        narration_block_count=narration_block_count,
     )
 
 
@@ -669,6 +1007,11 @@ def resolve_arguments(args: argparse.Namespace) -> argparse.Namespace:
     args.project_dir = project_dir
     args.video_dir = existing_directory(video_dir, "Video dir")
     args.audio_dir = existing_directory(audio_dir, "Audio dir")
+    args.transcript = (
+        existing_file(Path(args.transcript).expanduser().resolve(), "Transcript TXT")
+        if args.transcript
+        else None
+    )
     args.output = output
     if not args.sequence_name:
         base_name = project_dir.name if project_dir else content.stem
@@ -682,6 +1025,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--content", help="Đường dẫn content.docx")
     parser.add_argument("--video-dir", help="Thư mục video TH1-TH6")
     parser.add_argument("--audio-dir", help="Thư mục voice-over theo thứ tự kịch bản")
+    parser.add_argument(
+        "--transcript",
+        help="TXT dạng SRT, mỗi block tương ứng một file voice-over (tùy chọn)",
+    )
     parser.add_argument("--output", help="XML đầu ra; mặc định project-dir/output_simple.xml")
     parser.add_argument("--sequence-name", help="Tên sequence trong Premiere")
     parser.add_argument("--fps", type=int, default=60, help="Frame rate timeline (mặc định: 60)")
@@ -701,6 +1048,7 @@ def main() -> int:
             content=args.content,
             video_dir=args.video_dir,
             audio_dir=args.audio_dir,
+            transcript=args.transcript,
             output=args.output,
             sequence_name=args.sequence_name,
             fps=args.fps,
