@@ -124,6 +124,25 @@ WORKFLOW_STEPS = (
     "Xuất XML",
 )
 
+IS_MACOS = sys.platform == "darwin"
+SHORTCUT_LABEL = "Command" if IS_MACOS else "Ctrl"
+FILE_MANAGER_LABEL = (
+    "Finder"
+    if IS_MACOS
+    else "File Explorer"
+    if os.name == "nt"
+    else "trình quản lý tệp"
+)
+
+
+def bundled_asset(name: str) -> Path | None:
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    candidates = []
+    if bundle_root:
+        candidates.append(Path(bundle_root) / name)
+    candidates.append(Path(__file__).resolve().parent / "assets" / name)
+    return next((path for path in candidates if path.is_file()), None)
+
 
 def detect_dark_mode() -> bool:
     override = os.environ.get("XML_CUT_ROOM_THEME", "").strip().casefold()
@@ -284,14 +303,14 @@ class Toolbar(tk.Frame):
 
         open_button = ttk.Button(
             self,
-            text="⌘O",
+            text="⌘O" if IS_MACOS else "Ctrl+O",
             command=app._browse_project,
             style="ToolbarIcon.TButton",
-            width=4,
+            width=4 if IS_MACOS else 7,
             takefocus=True,
         )
         open_button.grid(row=0, column=3, padx=(4, 2), pady=6)
-        Tooltip(open_button, "Mở project (Command+O)", app.colors)
+        Tooltip(open_button, f"Mở project ({SHORTCUT_LABEL}+O)", app.colors)
 
         log_button = ttk.Button(
             self,
@@ -302,7 +321,7 @@ class Toolbar(tk.Frame):
             takefocus=True,
         )
         log_button.grid(row=0, column=4, padx=(2, 12), pady=6)
-        Tooltip(log_button, "Hiện hoặc ẩn nhật ký (Command+L)", app.colors)
+        Tooltip(log_button, f"Hiện hoặc ẩn nhật ký ({SHORTCUT_LABEL}+L)", app.colors)
 
         tk.Frame(self, bg=app.colors.separator, height=1).place(
             relx=0, rely=1, relwidth=1, anchor="sw"
@@ -867,6 +886,13 @@ class XmlGeneratorApp:
         self.dark_mode = detect_dark_mode()
         self.colors = DARK_COLORS if self.dark_mode else LIGHT_COLORS
         self.root.title("XML Cut Room")
+        icon_path = bundled_asset("xmlcutroom-logo.png")
+        if icon_path is not None:
+            try:
+                self.app_icon = tk.PhotoImage(file=icon_path)
+                self.root.iconphoto(True, self.app_icon)
+            except tk.TclError:
+                self.app_icon = None
         self.root.geometry("1280x800")
         self.root.minsize(LayoutTokens.MIN_WIDTH, LayoutTokens.MIN_HEIGHT)
         self.root.configure(bg=self.colors.window)
@@ -1346,11 +1372,12 @@ class XmlGeneratorApp:
             )
 
     def _bind_shortcuts(self) -> None:
-        self.root.bind_all("<Command-o>", self._shortcut_open)
-        self.root.bind_all("<Command-O>", self._shortcut_open)
-        self.root.bind_all("<Command-l>", self._shortcut_log)
-        self.root.bind_all("<Command-L>", self._shortcut_log)
-        self.root.bind_all("<Command-Return>", self._shortcut_confirm)
+        modifier = "Command" if IS_MACOS else "Control"
+        self.root.bind_all(f"<{modifier}-o>", self._shortcut_open)
+        self.root.bind_all(f"<{modifier}-O>", self._shortcut_open)
+        self.root.bind_all(f"<{modifier}-l>", self._shortcut_log)
+        self.root.bind_all(f"<{modifier}-L>", self._shortcut_log)
+        self.root.bind_all(f"<{modifier}-Return>", self._shortcut_confirm)
         self.root.bind_all("<Escape>", self._escape)
 
     def _shortcut_open(self, _event: tk.Event) -> str:
@@ -2017,7 +2044,7 @@ class XmlGeneratorApp:
         actions.pack(fill="x")
         ttk.Button(
             actions,
-            text="Mở trong Finder",
+            text=f"Mở trong {FILE_MANAGER_LABEL}",
             command=lambda: self._open_path_value(output),
         ).pack(side="left")
         ttk.Button(
@@ -2109,7 +2136,7 @@ class XmlGeneratorApp:
                 command = ["xdg-open", str(target)]
             subprocess.Popen(command)
         except OSError as exc:
-            self._show_error(f"Không thể mở Finder: {exc}")
+            self._show_error(f"Không thể mở {FILE_MANAGER_LABEL}: {exc}")
 
     def _path_menu(self, value: str) -> tk.Menu:
         menu = tk.Menu(
@@ -2123,7 +2150,7 @@ class XmlGeneratorApp:
         )
         menu.add_command(label="Copy Path", command=lambda: self._copy_value(value))
         menu.add_command(
-            label="Reveal in Finder",
+            label=f"Mở trong {FILE_MANAGER_LABEL}",
             command=lambda: self._open_path_value(Path(value).expanduser()),
         )
         return menu

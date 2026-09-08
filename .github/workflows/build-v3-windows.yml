@@ -1,0 +1,52 @@
+name: Build v3 Windows executable
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "tool/generate_simple_xml_v3_app.py"
+      - "tool/generate_simple_xml_v3.py"
+      - "tool/generate_simple_xml.py"
+      - "tool/generate_xml.py"
+      - "tool/build_v3_app.py"
+      - "tool/assets/**"
+      - "tool/requirements.txt"
+      - ".github/workflows/build-v3-windows.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r tool/requirements.txt "pyinstaller>=6.10,<7"
+
+      - name: Install FFprobe
+        shell: pwsh
+        run: choco install ffmpeg --yes --no-progress
+
+      - name: Locate FFprobe
+        shell: pwsh
+        run: |
+          $ffprobe = Get-ChildItem "$env:ChocolateyInstall\lib\ffmpeg\tools" -Filter ffprobe.exe -Recurse |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $ffprobe) { throw "ffprobe.exe was not found after installing FFmpeg" }
+          "FFPROBE_BINARY=$ffprobe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build xmlcutroom-win.exe
+        run: python tool/build_v3_app.py
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: xmlcutroom-win
+          path: dist/xmlcutroom-win.exe
+          if-no-files-found: error

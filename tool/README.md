@@ -108,3 +108,18 @@ Các đường dẫn tương đối được tính từ thư mục đang chạy 
 4. Nếu Premiere hỏi relink media, kiểm tra lại rằng project chưa bị di chuyển sau khi tạo XML.
 
 > Tool vẫn dùng 6 tình huống TH1–TH6 vì đó là cấu trúc lớn của template `28.8.xml`. Số voice-over và số cut bên trong mỗi bài được phép thay đổi. Slot được thêm sẽ kế thừa filter/thiết lập clip cơ bản gần nhất; các graphic đặc thù ở upper track có thể cần tinh chỉnh thủ công trong Premiere.
+
+## Build ứng dụng v3
+
+Cài dependency build rồi chạy trên đúng hệ điều hành đích:
+
+```bash
+python3 -m pip install -r tool/requirements.txt "pyinstaller>=6.10,<7"
+python3 tool/build_v3_app.py
+```
+
+- Windows tạo `dist/xmlcutroom-win.exe`.
+- macOS tạo `dist/xmlcutroom-mac.app`.
+- `ffprobe` được đóng gói cùng ứng dụng; máy chạy app không cần cài FFmpeg riêng.
+
+Muốn tạo `.exe` mà không có máy Windows, chạy workflow **Build v3 Windows executable** trong GitHub Actions rồi tải artifact `xmlcutroom-win`.

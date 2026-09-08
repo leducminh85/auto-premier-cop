@@ -120,9 +120,26 @@ def extract_timecodes(text: str) -> list[tuple[float, float]]:
 
 
 def run_ffprobe(path: Path) -> dict:
+    executable = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    bundled_executable = Path(bundle_root, executable) if bundle_root else None
+    ffprobe_command = (
+        str(bundled_executable)
+        if bundled_executable is not None and bundled_executable.is_file()
+        else executable
+    )
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)],
+            [
+                ffprobe_command,
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_format",
+                "-show_streams",
+                str(path),
+            ],
             capture_output=True,
             text=True,
             timeout=30,
