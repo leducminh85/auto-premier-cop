@@ -24,6 +24,7 @@ from PySide6.QtGui import (
     QLinearGradient,
     QPainter,
     QPainterPath,
+    QPalette,
     QPen,
     QPixmap,
     QResizeEvent,
@@ -100,6 +101,46 @@ FILE_MANAGER = (
     if os.name == "nt"
     else "trình quản lý tệp"
 )
+
+
+def apply_light_palette(application: QApplication) -> None:
+    """Lock Qt and native window chrome to the app's light appearance."""
+    application.styleHints().setColorScheme(Qt.ColorScheme.Light)
+    palette = QPalette()
+    colors = {
+        QPalette.ColorRole.Window: THEME.background,
+        QPalette.ColorRole.WindowText: THEME.text,
+        QPalette.ColorRole.Base: THEME.card,
+        QPalette.ColorRole.AlternateBase: "#F7FAFD",
+        QPalette.ColorRole.ToolTipBase: THEME.navy,
+        QPalette.ColorRole.ToolTipText: "#FFFFFF",
+        QPalette.ColorRole.Text: THEME.text,
+        QPalette.ColorRole.Button: THEME.card,
+        QPalette.ColorRole.ButtonText: THEME.text,
+        QPalette.ColorRole.BrightText: "#FFFFFF",
+        QPalette.ColorRole.Link: THEME.accent,
+        QPalette.ColorRole.Highlight: THEME.accent,
+        QPalette.ColorRole.HighlightedText: "#FFFFFF",
+        QPalette.ColorRole.PlaceholderText: THEME.tertiary,
+    }
+    for role, color in colors.items():
+        palette.setColor(role, QColor(color))
+    palette.setColor(
+        QPalette.ColorGroup.Disabled,
+        QPalette.ColorRole.WindowText,
+        QColor("#A9B4C4"),
+    )
+    palette.setColor(
+        QPalette.ColorGroup.Disabled,
+        QPalette.ColorRole.Text,
+        QColor("#A9B4C4"),
+    )
+    palette.setColor(
+        QPalette.ColorGroup.Disabled,
+        QPalette.ColorRole.ButtonText,
+        QColor("#A9B4C4"),
+    )
+    application.setPalette(palette)
 
 
 class Stage:
@@ -404,12 +445,12 @@ QToolTip {{ background: {THEME.navy}; color: white; border: none; padding: 6px; 
 
 class GradientSurface(QWidget):
     def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().paintEvent(event)
         painter = QPainter(self)
         gradient = QLinearGradient(0, 0, self.width(), self.height())
         gradient.setColorAt(0, QColor(THEME.gradient_start))
         gradient.setColorAt(1, QColor(THEME.gradient_end))
         painter.fillRect(self.rect(), gradient)
-        super().paintEvent(event)
 
 
 class ElideLabel(QLabel):
@@ -473,7 +514,7 @@ class HeaderBlock(QWidget):
         self.subtitle = QLabel(subtitle)
         self.subtitle.setProperty("role", "body")
         self.subtitle.setWordWrap(True)
-        self.subtitle.setMinimumHeight(22)
+        self.subtitle.setVisible(bool(subtitle))
         layout.addWidget(self.eyebrow)
         layout.addWidget(self.title)
         layout.addWidget(self.subtitle)
@@ -482,6 +523,7 @@ class HeaderBlock(QWidget):
         self.eyebrow.setText(eyebrow.upper())
         self.title.setText(title)
         self.subtitle.setText(subtitle)
+        self.subtitle.setVisible(bool(subtitle))
 
 
 class SourceCard(QFrame):
@@ -517,6 +559,7 @@ class SourceCard(QFrame):
         description_label = QLabel(description)
         description_label.setProperty("role", "caption")
         description_label.setWordWrap(True)
+        description_label.setVisible(bool(description))
         copy.addWidget(title_label)
         copy.addWidget(description_label)
         heading.addLayout(copy, 1)
@@ -832,7 +875,7 @@ class SetupPage(QScrollArea):
         self.header = HeaderBlock(
             "Bước 2",
             "Chuẩn bị dữ liệu",
-            "Kiểm tra các nguồn trước khi tạo timeline Premiere.",
+            "",
         )
         outer.addWidget(self.header)
         self.notice = QLabel()
@@ -853,19 +896,19 @@ class SetupPage(QScrollArea):
                 "content",
                 "file",
                 "Content DOCX",
-                "Cấu trúc bài, lời đọc và timecode video.",
+                "",
             ),
             "video": SourceCard(
                 "video",
                 "video",
                 "Thư mục video",
-                "Sáu video nguồn tương ứng TH1–TH6.",
+                "",
             ),
             "audio": SourceCard(
                 "audio",
                 "audio",
                 "Thư mục voice-over",
-                "Các file audio được sắp theo thứ tự tên.",
+                "",
             ),
         }
         self.summary = ProjectSummaryCard()
@@ -1102,7 +1145,7 @@ class ReviewPage(QWidget):
         self.header = HeaderBlock(
             "Bước 3",
             "Kiểm tra cấu trúc",
-            "Xác nhận các phần được đọc từ content DOCX trước khi xuất.",
+            "",
         )
         layout.addWidget(self.header)
         summary = QFrame()
@@ -1267,7 +1310,7 @@ class Sidebar(QFrame):
         project_layout = QVBoxLayout(self.project_card)
         project_layout.setContentsMargins(13, 12, 13, 12)
         project_layout.setSpacing(5)
-        project_caption = QLabel("PROJECT HIỆN TẠI")
+        project_caption = QLabel("Project")
         project_caption.setProperty("role", "eyebrow")
         self.project_name = ElideLabel("Chưa chọn")
         self.project_name.setStyleSheet(
@@ -1307,10 +1350,10 @@ class Sidebar(QFrame):
             self.step_rows.append((row, icon, label))
 
         layout.addStretch(1)
-        log_button = QPushButton("Nhật ký")
-        log_button.setIcon(make_icon("log", THEME.secondary, 18))
-        log_button.clicked.connect(self.logRequested)
-        layout.addWidget(log_button)
+        self.log_button = QPushButton("Nhật ký")
+        self.log_button.setIcon(make_icon("log", THEME.secondary, 18))
+        self.log_button.clicked.connect(self.logRequested)
+        layout.addWidget(self.log_button)
         version = QLabel("Phiên bản 3.0 · PySide6")
         version.setProperty("role", "caption")
         version.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1324,6 +1367,7 @@ class Sidebar(QFrame):
     ) -> None:
         self.project_name.setFullText(project.name if project else "Chưa chọn")
         self.project_status.setText(project_status)
+        self.project_status.setVisible(bool(project_status))
         self.change_button.setText("Đổi project" if project else "Chọn project")
         icons = ("folder", "grid", "review", "export")
         for index, (state, parts) in enumerate(
@@ -1527,16 +1571,6 @@ class XmlGeneratorApp(QMainWindow):
         workspace_layout.setContentsMargins(0, 0, 0, 0)
         workspace_layout.setSpacing(0)
         shell.addWidget(workspace, 1)
-
-        toolbar = QWidget()
-        toolbar_layout = QHBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(24, 12, 24, 4)
-        toolbar_layout.addStretch(1)
-        self.log_button = QPushButton("Nhật ký")
-        self.log_button.setIcon(make_icon("log", THEME.secondary, 18))
-        self.log_button.clicked.connect(self._toggle_log)
-        toolbar_layout.addWidget(self.log_button)
-        workspace_layout.addWidget(toolbar)
 
         self.pages = QStackedWidget()
         self.welcome_page = WelcomePage()
@@ -2029,13 +2063,13 @@ class XmlGeneratorApp(QMainWindow):
                 self.setup_page.header.setCopy(
                     "Bước 4",
                     "Sẵn sàng xuất XML",
-                    "Cấu trúc đã được xác nhận. Kiểm tra tên sequence và vị trí lưu.",
+                    "",
                 )
             else:
                 self.setup_page.header.setCopy(
                     "Bước 2",
                     "Chuẩn bị dữ liệu",
-                    "Kiểm tra các nguồn trước khi tạo timeline Premiere.",
+                    "",
                 )
         elif self.stage == Stage.REVIEW:
             self.pages.setCurrentWidget(self.review_page)
@@ -2064,7 +2098,7 @@ class XmlGeneratorApp(QMainWindow):
             return "Đã xuất XML"
         if self.verified_signature == self._input_signature():
             return "Sẵn sàng xuất"
-        return "Chờ xác nhận"
+        return ""
 
     def _step_states(
         self, states: dict[str, tuple[str, str]]
@@ -2169,7 +2203,9 @@ class XmlGeneratorApp(QMainWindow):
     def _toggle_log(self) -> None:
         visible = not self.log_panel.isVisible()
         self.log_panel.setVisible(visible)
-        self.log_button.setText("Ẩn nhật ký" if visible else "Nhật ký")
+        self.sidebar.log_button.setText(
+            "Ẩn nhật ký" if visible else "Nhật ký"
+        )
 
     def _log(self, message: str, level: str = "info") -> None:
         self.log_panel.append(message, level)
@@ -2257,6 +2293,7 @@ def main() -> int:
     application.setApplicationName("XML Cut Room")
     application.setOrganizationName("XML Cut Room")
     application.setStyle("Fusion")
+    apply_light_palette(application)
     system_font = QFontDatabase.systemFont(
         QFontDatabase.SystemFont.GeneralFont
     )
