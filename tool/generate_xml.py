@@ -119,6 +119,19 @@ def extract_timecodes(text: str) -> list[tuple[float, float]]:
     return segments
 
 
+def hidden_subprocess_options() -> dict[str, object]:
+    """Keep command-line helpers hidden when called by the Windows GUI."""
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "creationflags": subprocess.CREATE_NO_WINDOW,
+        "startupinfo": startupinfo,
+    }
+
+
 def run_ffprobe(path: Path) -> dict:
     executable = "ffprobe.exe" if os.name == "nt" else "ffprobe"
     bundle_root = getattr(sys, "_MEIPASS", None)
@@ -140,15 +153,34 @@ def run_ffprobe(path: Path) -> dict:
                 "-show_streams",
                 str(path),
             ],
-            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             check=True,
+            **hidden_subprocess_options(),
         )
-        return json.loads(result.stdout)
+        output = result.stdout
+        if not isinstance(output, str) or not output.strip():
+            details = (result.stderr or "").strip()
+            suffix = f"\nChi tiết ffprobe: {details}" if details else ""
+            raise GeneratorError(
+                f"ffprobe không trả về dữ liệu JSON cho media: {path}{suffix}"
+            )
+        try:
+            return json.loads(output)
+        except json.JSONDecodeError as exc:
+            details = (result.stderr or "").strip()
+            suffix = f"\nChi tiết ffprobe: {details}" if details else ""
+            raise GeneratorError(
+                f"ffprobe trả về JSON không hợp lệ cho media: {path}{suffix}"
+            ) from exc
     except FileNotFoundError as exc:
         raise GeneratorError("Không tìm thấy ffprobe. Hãy cài ffmpeg trước.") from exc
-    except (subprocess.SubprocessError, json.JSONDecodeError) as exc:
+    except subprocess.SubprocessError as exc:
         raise GeneratorError(f"Không đọc được media bằng ffprobe: {path}") from exc
 
 
