@@ -1,19 +1,60 @@
 #!/usr/bin/env python3
-"""Native macOS-style desktop interface for the Premiere XML generator."""
+"""PySide6 desktop interface for the Premiere XML generator."""
 
 from __future__ import annotations
 
 import os
-import queue
 import subprocess
 import sys
-import threading
-import tkinter as tk
+import traceback
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
 from typing import Callable
+
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QUrl, Signal, Slot
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QCloseEvent,
+    QDesktopServices,
+    QFontDatabase,
+    QIcon,
+    QKeySequence,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QResizeEvent,
+)
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QCheckBox,
+    QFileDialog,
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QGridLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLayout,
+    QLineEdit,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QStackedWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 from generate_simple_xml import SimpleGenerationSummary, generate_simple_project_xml
 from generate_simple_xml_v3 import (
@@ -29,104 +70,30 @@ from generate_xml import AUDIO_EXTENSIONS
 
 
 @dataclass(frozen=True)
-class ColorTokens:
-    window: str
-    sidebar: str
-    content: str
-    elevated: str
-    input: str
-    hover: str
-    selection: str
-    selection_soft: str
-    separator: str
-    text: str
-    secondary: str
-    tertiary: str
-    disabled: str
-    accent: str
-    success: str
-    warning: str
-    error: str
+class Theme:
+    background: str = "#EEF5FC"
+    gradient_start: str = "#E7F3FA"
+    gradient_end: str = "#ECEBFA"
+    card: str = "#FFFFFF"
+    text: str = "#1D2747"
+    secondary: str = "#63718A"
+    tertiary: str = "#8B98AC"
+    accent: str = "#39A9EA"
+    accent_soft: str = "#E2F3FF"
+    navy: str = "#1E294D"
+    navy_hover: str = "#2A3763"
+    border: str = "#DCE5F0"
+    success: str = "#247A5A"
+    success_soft: str = "#E6F5EF"
+    warning: str = "#956515"
+    warning_soft: str = "#FFF4D8"
+    error: str = "#BA4545"
+    error_soft: str = "#FCEAEA"
 
 
-DARK_COLORS = ColorTokens(
-    window="#1E1E1E",
-    sidebar="#252526",
-    content="#1C1C1E",
-    elevated="#2C2C2E",
-    input="#242426",
-    hover="#323235",
-    selection="#0A84FF",
-    selection_soft="#174A72",
-    separator="#38383A",
-    text="#EBEBF0",
-    secondary="#A1A1A6",
-    tertiary="#7C7C80",
-    disabled="#8A8A8F",
-    accent="#0A84FF",
-    success="#30D158",
-    warning="#FF9F0A",
-    error="#FF453A",
-)
-
-LIGHT_COLORS = ColorTokens(
-    window="#F2F2F7",
-    sidebar="#E9E9ED",
-    content="#FFFFFF",
-    elevated="#F2F2F7",
-    input="#FFFFFF",
-    hover="#E5E5EA",
-    selection="#007AFF",
-    selection_soft="#D9ECFF",
-    separator="#D1D1D6",
-    text="#1C1C1E",
-    secondary="#636366",
-    tertiary="#8E8E93",
-    disabled="#6E6E73",
-    accent="#007AFF",
-    success="#1F7A35",
-    warning="#C93400",
-    error="#D70015",
-)
-
-
-class LayoutTokens:
-    SIDEBAR_WIDTH = 220
-    TOOLBAR_HEIGHT = 44
-    ACTION_HEIGHT = 64
-    CONTENT_PAD_X = 24
-    CONTENT_PAD_Y = 20
-    ROW_HEIGHT = 58
-    SUMMARY_HEIGHT = 48
-    CONTROL_HEIGHT = 32
-    MIN_WIDTH = 960
-    MIN_HEIGHT = 640
-    LOG_HEIGHT = 170
-
-
-class TypeTokens:
-    UI = "SF Pro Text"
-    DISPLAY = "SF Pro Display"
-    MONO = "SF Mono"
-    TITLE = (DISPLAY, 24, "bold")
-    SECTION = (UI, 15, "bold")
-    ROW = (UI, 13, "bold")
-    BODY = (UI, 13)
-    SECONDARY = (UI, 11)
-    BUTTON = (UI, 13, "bold")
-    MONO_SMALL = (MONO, 11)
-
-
-WORKFLOW_STEPS = (
-    "Chọn project",
-    "Chuẩn bị dữ liệu",
-    "Kiểm tra cấu trúc",
-    "Xuất XML",
-)
-
+THEME = Theme()
 IS_MACOS = sys.platform == "darwin"
-SHORTCUT_LABEL = "Command" if IS_MACOS else "Ctrl"
-FILE_MANAGER_LABEL = (
+FILE_MANAGER = (
     "Finder"
     if IS_MACOS
     else "File Explorer"
@@ -135,47 +102,33 @@ FILE_MANAGER_LABEL = (
 )
 
 
+class Stage:
+    WELCOME = "welcome"
+    SETUP = "setup"
+    REVIEW = "review"
+    READY = "ready"
+    SUCCESS = "success"
+
+
+STEP_TITLES = (
+    "Chọn project",
+    "Chuẩn bị dữ liệu",
+    "Kiểm tra cấu trúc",
+    "Xuất XML",
+)
+
+
 def bundled_asset(name: str) -> Path | None:
     bundle_root = getattr(sys, "_MEIPASS", None)
-    candidates = []
+    candidates: list[Path] = []
     if bundle_root:
         candidates.append(Path(bundle_root) / name)
     candidates.append(Path(__file__).resolve().parent / "assets" / name)
     return next((path for path in candidates if path.is_file()), None)
 
 
-def detect_dark_mode() -> bool:
-    override = os.environ.get("XML_CUT_ROOM_THEME", "").strip().casefold()
-    if override in {"dark", "light"}:
-        return override == "dark"
-    if sys.platform == "darwin":
-        try:
-            result = subprocess.run(
-                ["defaults", "read", "-g", "AppleInterfaceStyle"],
-                capture_output=True,
-                text=True,
-                timeout=1,
-                check=False,
-            )
-            return result.stdout.strip().casefold() == "dark"
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    return False
-
-
-def path_text(path: Path | str) -> str:
-    return str(Path(path).expanduser())
-
-
 def normalized_path(path: Path | None) -> str:
     return unicodedata.normalize("NFC", os.path.normcase(str(path))) if path else ""
-
-
-def shorten_middle(value: str, length: int = 74) -> str:
-    if len(value) <= length:
-        return value
-    left = max(12, (length - 3) // 2)
-    return value[:left] + "..." + value[-(length - left - 3) :]
 
 
 def component_is_ready(component: ArticleComponent) -> bool:
@@ -205,7 +158,7 @@ def discover_audio_directory(project_dir: Path) -> Path:
         and "Adobe Premiere Pro Auto-Save" not in path.parts
     }
     if not candidates:
-        raise GeneratorError("Không tự tìm thấy thư mục audio trong project")
+        raise GeneratorError("Không tự tìm thấy thư mục voice-over trong project")
     return min(
         candidates,
         key=lambda path: (
@@ -216,1960 +169,2106 @@ def discover_audio_directory(project_dir: Path) -> Path:
     )
 
 
-class Tooltip:
-    def __init__(
-        self,
-        widget: tk.Misc,
-        text: str | Callable[[], str],
-        colors: ColorTokens,
-    ) -> None:
-        self.widget = widget
-        self.text = text
-        self.colors = colors
-        self.tip: tk.Toplevel | None = None
-        self.after_id: str | None = None
-        widget.bind("<Enter>", self._schedule, add="+")
-        widget.bind("<Leave>", self._hide, add="+")
-        widget.bind("<ButtonPress>", self._hide, add="+")
+def discover_project_sources(project_dir: Path) -> dict[str, object]:
+    """Discover each source independently so incomplete projects remain editable."""
+    project_dir = project_dir.expanduser().resolve()
+    if not project_dir.is_dir():
+        raise GeneratorError(f"Không tìm thấy thư mục project: {project_dir}")
 
-    def _schedule(self, _event: tk.Event | None = None) -> None:
-        self._hide()
-        self.after_id = self.widget.after(450, self._show)
-
-    def _show(self) -> None:
-        value = self.text() if callable(self.text) else self.text
-        if not value or not self.widget.winfo_exists():
-            return
-        tip = tk.Toplevel(self.widget)
-        self.tip = tip
-        tip.wm_overrideredirect(True)
-        tip.configure(bg=self.colors.separator)
-        x = self.widget.winfo_rootx() + 4
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 7
-        tip.geometry(f"+{x}+{y}")
-        tk.Label(
-            tip,
-            text=value,
-            bg=self.colors.elevated,
-            fg=self.colors.text,
-            font=TypeTokens.SECONDARY,
-            padx=10,
-            pady=7,
-            justify="left",
-            wraplength=520,
-        ).pack(padx=1, pady=1)
-
-    def _hide(self, _event: tk.Event | None = None) -> None:
-        if self.after_id:
-            try:
-                self.widget.after_cancel(self.after_id)
-            except tk.TclError:
-                pass
-            self.after_id = None
-        if self.tip is not None:
-            self.tip.destroy()
-            self.tip = None
-
-
-class Toolbar(tk.Frame):
-    def __init__(self, parent: tk.Misc, app: "XmlGeneratorApp") -> None:
-        super().__init__(
-            parent,
-            bg=app.colors.window,
-            height=LayoutTokens.TOOLBAR_HEIGHT,
-            highlightthickness=0,
+    content = find_named_child(project_dir, DEFAULT_CONTENT_NAME)
+    if content is None:
+        docx_files = sorted(
+            project_dir.glob("*.docx"), key=lambda path: path.name.casefold()
         )
-        self.app = app
-        self.grid_propagate(False)
-        self.grid_columnconfigure(2, weight=1)
+        content = docx_files[0] if docx_files else None
 
-        self.back_button = ttk.Button(
-            self,
-            text="‹",
-            command=app._cancel_review,
-            style="Icon.TButton",
-            width=3,
-            takefocus=True,
+    errors: dict[str, str] = {}
+    video_dir: Path | None = None
+    video_count = 0
+    try:
+        video_dir, videos = discover_video_media(project_dir, None)
+        video_count = len(videos)
+    except GeneratorError as exc:
+        errors["video"] = str(exc)
+
+    audio_dir: Path | None = None
+    voiceover_count = 0
+    try:
+        audio_dir = discover_audio_directory(project_dir)
+        voiceover_count = audio_file_count(audio_dir)
+    except GeneratorError as exc:
+        errors["audio"] = str(exc)
+
+    if content is None:
+        errors["content"] = "Không tìm thấy file DOCX trong project"
+
+    return {
+        "project": project_dir.resolve(),
+        "content": content.resolve() if content else None,
+        "video": video_dir,
+        "audio": audio_dir,
+        "video_count": video_count,
+        "voiceover_count": voiceover_count,
+        "errors": errors,
+    }
+
+
+def add_shadow(widget: QWidget, blur: int = 30, y_offset: int = 8) -> None:
+    shadow = QGraphicsDropShadowEffect(widget)
+    shadow.setBlurRadius(blur)
+    shadow.setOffset(0, y_offset)
+    shadow.setColor(QColor(82, 112, 145, 35))
+    widget.setGraphicsEffect(shadow)
+
+
+def repolish(widget: QWidget) -> None:
+    style = widget.style()
+    style.unpolish(widget)
+    style.polish(widget)
+    widget.update()
+
+
+def make_icon(kind: str, color: str = THEME.text, size: int = 22) -> QIcon:
+    """Draw one consistent outline icon family without text glyphs."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(
+        QColor(color),
+        max(1.5, size / 13),
+        Qt.PenStyle.SolidLine,
+        Qt.PenCapStyle.RoundCap,
+        Qt.PenJoinStyle.RoundJoin,
+    )
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    s = float(size)
+
+    if kind == "folder":
+        path = QPainterPath()
+        path.moveTo(s * 0.13, s * 0.32)
+        path.lineTo(s * 0.4, s * 0.32)
+        path.lineTo(s * 0.48, s * 0.42)
+        path.lineTo(s * 0.87, s * 0.42)
+        path.lineTo(s * 0.8, s * 0.78)
+        path.lineTo(s * 0.16, s * 0.78)
+        path.closeSubpath()
+        painter.drawPath(path)
+    elif kind == "file":
+        painter.drawRoundedRect(
+            int(s * 0.24), int(s * 0.12), int(s * 0.52), int(s * 0.76), 2, 2
         )
-        self.back_button.grid(row=0, column=0, padx=(12, 4), pady=6)
-        Tooltip(self.back_button, "Quay lại", app.colors)
-
-        ttk.Label(
-            self,
-            textvariable=app.project_name_var,
-            style="ToolbarTitle.TLabel",
-            anchor="w",
-        ).grid(row=0, column=1, sticky="w", padx=(4, 8))
-
-        open_button = ttk.Button(
-            self,
-            text="⌘O" if IS_MACOS else "Ctrl+O",
-            command=app._browse_project,
-            style="ToolbarIcon.TButton",
-            width=4 if IS_MACOS else 7,
-            takefocus=True,
+        painter.drawLine(
+            int(s * 0.34), int(s * 0.52), int(s * 0.66), int(s * 0.52)
         )
-        open_button.grid(row=0, column=3, padx=(4, 2), pady=6)
-        Tooltip(open_button, f"Mở project ({SHORTCUT_LABEL}+O)", app.colors)
-
-        log_button = ttk.Button(
-            self,
-            text="≡",
-            command=app._toggle_log,
-            style="ToolbarIcon.TButton",
-            width=3,
-            takefocus=True,
+        painter.drawLine(
+            int(s * 0.34), int(s * 0.66), int(s * 0.58), int(s * 0.66)
         )
-        log_button.grid(row=0, column=4, padx=(2, 12), pady=6)
-        Tooltip(log_button, f"Hiện hoặc ẩn nhật ký ({SHORTCUT_LABEL}+L)", app.colors)
-
-        tk.Frame(self, bg=app.colors.separator, height=1).place(
-            relx=0, rely=1, relwidth=1, anchor="sw"
+    elif kind == "video":
+        painter.drawRoundedRect(
+            int(s * 0.12), int(s * 0.24), int(s * 0.59), int(s * 0.52), 4, 4
         )
-
-    def set_can_go_back(self, enabled: bool) -> None:
-        self.back_button.configure(state="normal" if enabled else "disabled")
-
-
-class Sidebar(tk.Frame):
-    def __init__(self, parent: tk.Misc, app: "XmlGeneratorApp") -> None:
-        super().__init__(
-            parent,
-            bg=app.colors.sidebar,
-            width=LayoutTokens.SIDEBAR_WIDTH,
-            highlightthickness=0,
-        )
-        self.app = app
-        self.grid_propagate(False)
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(4, weight=1)
-        self.step_widgets: list[tuple[tk.Frame, tk.Label, tk.Label]] = []
-
-        project_group = tk.Frame(self, bg=app.colors.sidebar)
-        project_group.grid(row=0, column=0, sticky="ew", padx=12, pady=(18, 10))
-        tk.Label(
-            project_group,
-            text="PROJECT",
-            bg=app.colors.sidebar,
-            fg=app.colors.tertiary,
-            font=(TypeTokens.UI, 10, "bold"),
-            anchor="w",
-        ).pack(fill="x", padx=8, pady=(0, 5))
-        project_row = tk.Frame(project_group, bg=app.colors.hover, padx=9, pady=7)
-        project_row.pack(fill="x")
-        tk.Label(
-            project_row,
-            text="▤",
-            bg=app.colors.hover,
-            fg=app.colors.accent,
-            font=TypeTokens.BODY,
-            width=2,
-        ).pack(side="left")
-        project_copy = tk.Frame(project_row, bg=app.colors.hover)
-        project_copy.pack(side="left", fill="x", expand=True, padx=(5, 0))
-        tk.Label(
-            project_copy,
-            textvariable=app.project_name_var,
-            bg=app.colors.hover,
-            fg=app.colors.text,
-            font=TypeTokens.ROW,
-            anchor="w",
-        ).pack(fill="x")
-        self.project_status = tk.Label(
-            project_copy,
-            textvariable=app.project_badge_var,
-            bg=app.colors.hover,
-            fg=app.colors.secondary,
-            font=TypeTokens.SECONDARY,
-            anchor="w",
-        )
-        self.project_status.pack(fill="x", pady=(1, 0))
-
-        tk.Frame(self, bg=app.colors.separator, height=1).grid(
-            row=1, column=0, sticky="ew", padx=12
-        )
-
-        steps = tk.Frame(self, bg=app.colors.sidebar)
-        steps.grid(row=2, column=0, sticky="ew", padx=12, pady=(16, 0))
-        tk.Label(
-            steps,
-            text="QUY TRÌNH",
-            bg=app.colors.sidebar,
-            fg=app.colors.tertiary,
-            font=(TypeTokens.UI, 10, "bold"),
-            anchor="w",
-        ).pack(fill="x", padx=8, pady=(0, 5))
-        for title in WORKFLOW_STEPS:
-            row = tk.Frame(steps, bg=app.colors.sidebar, padx=8, pady=7)
-            row.pack(fill="x", pady=1)
-            icon = tk.Label(
-                row,
-                text="○",
-                bg=app.colors.sidebar,
-                fg=app.colors.tertiary,
-                font=(TypeTokens.UI, 12, "bold"),
-                width=2,
-            )
-            icon.pack(side="left")
-            label = tk.Label(
-                row,
-                text=title,
-                bg=app.colors.sidebar,
-                fg=app.colors.secondary,
-                font=TypeTokens.BODY,
-                anchor="w",
-            )
-            label.pack(side="left", fill="x", expand=True, padx=(6, 0))
-            self.step_widgets.append((row, icon, label))
-
-        tk.Label(
-            self,
-            text="Phiên bản 3.0",
-            bg=app.colors.sidebar,
-            fg=app.colors.tertiary,
-            font=TypeTokens.SECONDARY,
-            anchor="w",
-        ).grid(row=5, column=0, sticky="sw", padx=20, pady=16)
-
-        tk.Frame(self, bg=app.colors.separator, width=1).place(
-            relx=1, rely=0, relheight=1, anchor="ne"
-        )
-
-    def update_states(self, states: list[str]) -> None:
-        state_colors = {
-            "pending": self.app.colors.tertiary,
-            "current": self.app.colors.accent,
-            "complete": self.app.colors.success,
-            "error": self.app.colors.error,
-        }
-        state_icons = {
-            "pending": "○",
-            "current": "●",
-            "complete": "✓",
-            "error": "!",
-        }
-        for state, (row, icon, label) in zip(states, self.step_widgets, strict=True):
-            background = (
-                self.app.colors.selection_soft
-                if state == "current"
-                else self.app.colors.sidebar
-            )
-            color = state_colors[state]
-            row.configure(bg=background)
-            icon.configure(text=state_icons[state], bg=background, fg=color)
-            label.configure(
-                bg=background,
-                fg=self.app.colors.text if state == "current" else color,
-                font=(TypeTokens.UI, 13, "bold" if state == "current" else "normal"),
-            )
-
-
-class SummaryBar(tk.Frame):
-    def __init__(
-        self,
-        parent: tk.Misc,
-        app: "XmlGeneratorApp",
-        components: list[ArticleComponent],
-        voiceovers: int,
-    ) -> None:
-        super().__init__(
-            parent,
-            bg=app.colors.elevated,
-            height=LayoutTokens.SUMMARY_HEIGHT,
-            highlightthickness=0,
-        )
-        self.app = app
-        self.pack_propagate(False)
-        self.selected_var = tk.StringVar(value="0/8 đã chọn")
-        self.select_all_var = tk.BooleanVar(value=False)
-
-        metrics = tk.Frame(self, bg=app.colors.elevated)
-        metrics.pack(side="left", fill="y", padx=(14, 0))
-        total_video = sum(item.video_cut_count for item in components)
-        total_voice = voiceovers or sum(item.text_block_count for item in components)
-        values: list[str | tk.StringVar] = [
-            f"{len(components)} thành phần",
-            f"{total_video} video cut",
-            f"{total_voice} voice-over",
-            self.selected_var,
-        ]
-        for index, value in enumerate(values):
-            if index:
-                tk.Frame(metrics, bg=app.colors.separator, width=1, height=16).pack(
-                    side="left", padx=10, pady=16
+        path = QPainterPath()
+        path.moveTo(s * 0.71, s * 0.4)
+        path.lineTo(s * 0.9, s * 0.3)
+        path.lineTo(s * 0.9, s * 0.7)
+        path.lineTo(s * 0.71, s * 0.6)
+        painter.drawPath(path)
+    elif kind == "audio":
+        for x, top, bottom in (
+            (0.29, 0.36, 0.64),
+            (0.45, 0.24, 0.76),
+            (0.61, 0.32, 0.68),
+            (0.77, 0.43, 0.57),
+        ):
+            painter.drawLine(int(s * x), int(s * top), int(s * x), int(s * bottom))
+    elif kind == "grid":
+        for row in range(2):
+            for column in range(2):
+                painter.drawRoundedRect(
+                    int(s * (0.16 + column * 0.38)),
+                    int(s * (0.16 + row * 0.38)),
+                    int(s * 0.27),
+                    int(s * 0.27),
+                    3,
+                    3,
                 )
-            tk.Label(
-                metrics,
-                textvariable=value if isinstance(value, tk.StringVar) else None,
-                text="" if isinstance(value, tk.StringVar) else value,
-                bg=app.colors.elevated,
-                fg=app.colors.text if index == 0 else app.colors.secondary,
-                font=TypeTokens.BODY,
-            ).pack(side="left", pady=14)
+    elif kind == "review":
+        painter.drawRoundedRect(
+            int(s * 0.18), int(s * 0.13), int(s * 0.64), int(s * 0.74), 4, 4
+        )
+        painter.drawLine(
+            int(s * 0.31), int(s * 0.38), int(s * 0.42), int(s * 0.49)
+        )
+        painter.drawLine(
+            int(s * 0.42), int(s * 0.49), int(s * 0.65), int(s * 0.27)
+        )
+        painter.drawLine(
+            int(s * 0.31), int(s * 0.66), int(s * 0.68), int(s * 0.66)
+        )
+    elif kind == "export":
+        painter.drawRoundedRect(
+            int(s * 0.19), int(s * 0.18), int(s * 0.62), int(s * 0.67), 4, 4
+        )
+        painter.drawLine(int(s * 0.5), int(s * 0.63), int(s * 0.5), int(s * 0.08))
+        painter.drawLine(int(s * 0.35), int(s * 0.24), int(s * 0.5), int(s * 0.08))
+        painter.drawLine(int(s * 0.65), int(s * 0.24), int(s * 0.5), int(s * 0.08))
+    elif kind == "check":
+        painter.drawEllipse(
+            int(s * 0.12), int(s * 0.12), int(s * 0.76), int(s * 0.76)
+        )
+        painter.drawLine(int(s * 0.29), int(s * 0.51), int(s * 0.43), int(s * 0.65))
+        painter.drawLine(int(s * 0.43), int(s * 0.65), int(s * 0.72), int(s * 0.35))
+    elif kind == "log":
+        for y in (0.28, 0.5, 0.72):
+            painter.drawEllipse(int(s * 0.15), int(s * y - 1), 2, 2)
+            painter.drawLine(int(s * 0.29), int(s * y), int(s * 0.82), int(s * y))
+    elif kind == "copy":
+        painter.drawRoundedRect(
+            int(s * 0.28), int(s * 0.17), int(s * 0.5), int(s * 0.55), 3, 3
+        )
+        painter.drawRoundedRect(
+            int(s * 0.17), int(s * 0.3), int(s * 0.5), int(s * 0.55), 3, 3
+        )
+    elif kind == "open":
+        painter.drawRoundedRect(
+            int(s * 0.15), int(s * 0.28), int(s * 0.56), int(s * 0.56), 3, 3
+        )
+        painter.drawLine(int(s * 0.44), int(s * 0.56), int(s * 0.86), int(s * 0.14))
+        painter.drawLine(int(s * 0.6), int(s * 0.14), int(s * 0.86), int(s * 0.14))
+        painter.drawLine(int(s * 0.86), int(s * 0.14), int(s * 0.86), int(s * 0.4))
+    else:
+        painter.drawEllipse(int(s * 0.2), int(s * 0.2), int(s * 0.6), int(s * 0.6))
 
-        controls = tk.Frame(self, bg=app.colors.elevated)
-        controls.pack(side="right", fill="y", padx=(8, 12))
-        valid = all(component_is_ready(item) for item in components)
-        tk.Label(
-            controls,
-            text="✓ Dữ liệu hợp lệ" if valid else "! Cần kiểm tra",
-            bg=app.colors.elevated,
-            fg=app.colors.success if valid else app.colors.warning,
-            font=TypeTokens.SECONDARY,
-        ).pack(side="left", padx=(0, 13), pady=14)
-        ttk.Checkbutton(
-            controls,
-            text="Chọn tất cả",
-            variable=self.select_all_var,
-            command=app._select_all,
-            style="Summary.TCheckbutton",
-            takefocus=True,
-        ).pack(side="left", pady=11)
-
-    def set_selected(self, selected: int, total: int) -> None:
-        self.selected_var.set(f"{selected}/{total} đã chọn")
-        self.select_all_var.set(bool(total and selected == total))
+    painter.end()
+    return QIcon(pixmap)
 
 
-class StructureList(tk.Frame):
-    """Native table/tree with one owned scrollbar and inline detail rows."""
+APP_STYLE = f"""
+QWidget {{ color: {THEME.text}; font-size: 14px; }}
+QFrame[card="true"] {{
+    background: {THEME.card};
+    border: 1px solid rgba(220, 229, 240, 0.75);
+    border-radius: 24px;
+}}
+QLabel[role="title"] {{ font-size: 29px; font-weight: 500; color: {THEME.text}; }}
+QLabel[role="cardTitle"] {{ font-size: 18px; font-weight: 500; color: {THEME.text}; }}
+QLabel[role="sectionTitle"] {{ font-size: 16px; font-weight: 500; color: {THEME.text}; }}
+QLabel[role="body"] {{ font-size: 14px; color: {THEME.secondary}; }}
+QLabel[role="caption"] {{ font-size: 12px; color: {THEME.secondary}; }}
+QLabel[role="eyebrow"] {{ font-size: 11px; font-weight: 600; color: {THEME.accent}; }}
+QLabel[role="path"] {{ font-size: 12px; color: {THEME.tertiary}; }}
+QLabel[role="error"] {{ font-size: 12px; color: {THEME.error}; }}
+QLabel[badge="ready"] {{ background: {THEME.success_soft}; color: {THEME.success}; border-radius: 10px; padding: 4px 9px; font-size: 11px; font-weight: 600; }}
+QLabel[badge="warning"] {{ background: {THEME.warning_soft}; color: {THEME.warning}; border-radius: 10px; padding: 4px 9px; font-size: 11px; font-weight: 600; }}
+QLabel[badge="error"] {{ background: {THEME.error_soft}; color: {THEME.error}; border-radius: 10px; padding: 4px 9px; font-size: 11px; font-weight: 600; }}
+QLabel[badge="neutral"] {{ background: #F1F5F9; color: {THEME.secondary}; border-radius: 10px; padding: 4px 9px; font-size: 11px; font-weight: 600; }}
+QPushButton {{
+    min-height: 34px; border-radius: 12px; padding: 0 14px;
+    font-size: 13px; font-weight: 500; border: 1px solid {THEME.border};
+    background: white; color: {THEME.text};
+}}
+QPushButton:hover {{ background: #F5F9FD; border-color: #C8D6E7; }}
+QPushButton:pressed {{ background: #EAF1F8; }}
+QPushButton:focus {{ border: 2px solid {THEME.accent}; }}
+QPushButton:disabled {{ color: #A9B4C4; background: #F3F6F9; border-color: #E7EDF4; }}
+QPushButton[variant="primary"] {{ background: {THEME.navy}; color: white; border: none; min-height: 40px; padding: 0 20px; }}
+QPushButton[variant="primary"]:hover {{ background: {THEME.navy_hover}; }}
+QPushButton[variant="primary"]:pressed {{ background: #151E3A; }}
+QPushButton[variant="primary"]:disabled {{ background: #CBD3DF; color: #F5F7FA; }}
+QPushButton[variant="soft"] {{ background: {THEME.accent_soft}; color: #1678B3; border: none; }}
+QPushButton[variant="soft"]:hover {{ background: #D4EDFC; }}
+QPushButton[variant="icon"] {{ min-width: 34px; max-width: 34px; padding: 0; background: transparent; border: none; }}
+QPushButton[variant="icon"]:hover {{ background: {THEME.accent_soft}; }}
+QLineEdit {{ background: #F7FAFD; border: 1px solid {THEME.border}; border-radius: 12px; min-height: 40px; padding: 0 12px; selection-background-color: {THEME.accent}; }}
+QLineEdit:focus {{ border: 2px solid {THEME.accent}; background: white; }}
+QPlainTextEdit {{ background: #F7FAFD; border: 1px solid {THEME.border}; border-radius: 14px; padding: 10px; color: {THEME.secondary}; font-size: 12px; }}
+QTreeWidget {{ background: white; border: none; outline: none; alternate-background-color: #F8FBFE; }}
+QTreeWidget::item {{ min-height: 48px; border-bottom: 1px solid #EDF2F7; }}
+QTreeWidget::item:hover {{ background: #F3F8FD; }}
+QTreeWidget::item:selected {{ background: {THEME.accent_soft}; color: {THEME.text}; }}
+QHeaderView::section {{ background: #F7FAFD; color: {THEME.secondary}; border: none; border-bottom: 1px solid {THEME.border}; padding: 10px 8px; font-size: 12px; font-weight: 500; }}
+QCheckBox {{ spacing: 8px; color: {THEME.secondary}; }}
+QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 5px; border: 1px solid #BCC9D8; background: white; }}
+QCheckBox::indicator:checked {{ background: {THEME.navy}; border-color: {THEME.navy}; }}
+QProgressBar {{ border: none; background: #DFE8F2; border-radius: 3px; max-height: 5px; min-height: 5px; }}
+QProgressBar::chunk {{ background: {THEME.accent}; border-radius: 3px; }}
+QScrollArea {{ border: none; background: transparent; }}
+QScrollBar:vertical {{ background: transparent; width: 9px; margin: 2px; }}
+QScrollBar::handle:vertical {{ background: #C7D4E3; min-height: 40px; border-radius: 4px; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QToolTip {{ background: {THEME.navy}; color: white; border: none; padding: 6px; }}
+"""
+
+
+class GradientSurface(QWidget):
+    def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        painter = QPainter(self)
+        gradient = QLinearGradient(0, 0, self.width(), self.height())
+        gradient.setColorAt(0, QColor(THEME.gradient_start))
+        gradient.setColorAt(1, QColor(THEME.gradient_end))
+        painter.fillRect(self.rect(), gradient)
+        super().paintEvent(event)
+
+
+class ElideLabel(QLabel):
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self._full_text = text
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+    def setFullText(self, text: str) -> None:
+        self._full_text = text
+        self.setToolTip(text)
+        self._update_elision()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._update_elision()
+
+    def _update_elision(self) -> None:
+        self.setText(
+            self.fontMetrics().elidedText(
+                self._full_text,
+                Qt.TextElideMode.ElideMiddle,
+                max(40, self.width() - 4),
+            )
+        )
+
+
+class IconTile(QFrame):
+    def __init__(self, kind: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("IconTile")
+        self.setFixedSize(46, 46)
+        self.setStyleSheet(
+            f"QFrame#IconTile {{ background: {THEME.accent_soft}; "
+            "border-radius: 14px; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(11, 11, 11, 11)
+        label = QLabel()
+        label.setPixmap(make_icon(kind, THEME.accent, 24).pixmap(24, 24))
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(label)
+
+
+class HeaderBlock(QWidget):
+    def __init__(
+        self,
+        eyebrow: str,
+        title: str,
+        subtitle: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+        self.eyebrow = QLabel(eyebrow.upper())
+        self.eyebrow.setProperty("role", "eyebrow")
+        self.title = QLabel(title)
+        self.title.setProperty("role", "title")
+        self.subtitle = QLabel(subtitle)
+        self.subtitle.setProperty("role", "body")
+        self.subtitle.setWordWrap(True)
+        self.subtitle.setMinimumHeight(22)
+        layout.addWidget(self.eyebrow)
+        layout.addWidget(self.title)
+        layout.addWidget(self.subtitle)
+
+    def setCopy(self, eyebrow: str, title: str, subtitle: str) -> None:
+        self.eyebrow.setText(eyebrow.upper())
+        self.title.setText(title)
+        self.subtitle.setText(subtitle)
+
+
+class SourceCard(QFrame):
+    chooseRequested = Signal(str)
+    copyRequested = Signal(str)
+    openRequested = Signal(str)
 
     def __init__(
         self,
-        parent: tk.Misc,
-        app: "XmlGeneratorApp",
-        components: list[ArticleComponent],
+        key: str,
+        icon: str,
+        title: str,
+        description: str,
+        parent: QWidget | None = None,
     ) -> None:
-        super().__init__(parent, bg=app.colors.content, highlightthickness=0)
-        self.app = app
-        self.components = components
-        self.iid_to_index: dict[str, int] = {}
-        self.parent_iids: list[str] = []
-        self.hover_iid = ""
-        self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(0, weight=1)
+        super().__init__(parent)
+        self.key = key
+        self.current_path = ""
+        self.setProperty("card", True)
+        self.setMinimumHeight(178)
+        add_shadow(self, 24, 6)
 
-        self.tree = ttk.Treeview(
-            self,
-            columns=("check", "name", "preview", "video", "voice", "state"),
-            show="headings",
-            selectmode="none",
-            style="Structure.Treeview",
-            takefocus=True,
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(22, 20, 22, 18)
+        outer.setSpacing(12)
+        heading = QHBoxLayout()
+        heading.setSpacing(13)
+        heading.addWidget(IconTile(icon))
+        copy = QVBoxLayout()
+        copy.setSpacing(3)
+        title_label = QLabel(title)
+        title_label.setProperty("role", "cardTitle")
+        description_label = QLabel(description)
+        description_label.setProperty("role", "caption")
+        description_label.setWordWrap(True)
+        copy.addWidget(title_label)
+        copy.addWidget(description_label)
+        heading.addLayout(copy, 1)
+        self.badge = QLabel("Chưa chọn")
+        self.badge.setProperty("badge", "neutral")
+        self.badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heading.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignTop)
+        outer.addLayout(heading)
+
+        self.name_label = ElideLabel("Chưa chọn nguồn")
+        self.name_label.setProperty("role", "sectionTitle")
+        self.path_label = ElideLabel("")
+        self.path_label.setProperty("role", "path")
+        outer.addWidget(self.name_label)
+        outer.addWidget(self.path_label)
+
+        self.error_label = QLabel()
+        self.error_label.setProperty("role", "error")
+        self.error_label.setWordWrap(True)
+        self.error_label.hide()
+        outer.addWidget(self.error_label)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        self.choose_button = QPushButton("Chọn nguồn")
+        self.choose_button.setProperty("variant", "soft")
+        self.choose_button.setIcon(make_icon("folder", "#1678B3", 18))
+        self.choose_button.clicked.connect(
+            lambda: self.chooseRequested.emit(self.key)
         )
-        self.tree.heading("check", text="")
-        self.tree.heading("name", text="Thành phần", anchor="w")
-        self.tree.heading("preview", text="Nội dung", anchor="w")
-        self.tree.heading("video", text="Video", anchor="e")
-        self.tree.heading("voice", text="Voice-over", anchor="e")
-        self.tree.heading("state", text="", anchor="center")
-        self.tree.column("check", width=42, minwidth=42, stretch=False, anchor="center")
-        self.tree.column("name", width=135, minwidth=115, stretch=False, anchor="w")
-        self.tree.column("preview", width=250, minwidth=170, stretch=False, anchor="w")
-        self.tree.column("video", width=72, minwidth=68, stretch=False, anchor="e")
-        self.tree.column("voice", width=98, minwidth=92, stretch=False, anchor="e")
-        self.tree.column("state", width=42, minwidth=40, stretch=False, anchor="center")
-
-        scrollbar = ttk.Scrollbar(
-            self,
-            orient="vertical",
-            command=self.tree.yview,
-            style="CutRoom.Vertical.TScrollbar",
+        self.copy_button = QPushButton("Copy")
+        self.copy_button.setIcon(make_icon("copy", THEME.secondary, 17))
+        self.copy_button.clicked.connect(
+            lambda: self.copyRequested.emit(self.current_path)
         )
-        self.tree.configure(yscrollcommand=scrollbar.set)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        self.scrollbar = scrollbar
-
-        self.tree.tag_configure("valid", foreground=app.colors.text)
-        self.tree.tag_configure("invalid", foreground=app.colors.error)
-        self.tree.tag_configure(
-            "checked", background=app.colors.selection, foreground="#FFFFFF"
+        self.open_button = QPushButton(f"Mở {FILE_MANAGER}")
+        self.open_button.setIcon(make_icon("open", THEME.secondary, 17))
+        self.open_button.clicked.connect(
+            lambda: self.openRequested.emit(self.current_path)
         )
-        self.tree.tag_configure("hover", background=app.colors.hover)
-        self.tree.tag_configure(
-            "detail", background=app.colors.elevated, foreground=app.colors.secondary
+        actions.addWidget(self.choose_button)
+        actions.addStretch(1)
+        actions.addWidget(self.copy_button)
+        actions.addWidget(self.open_button)
+        outer.addLayout(actions)
+
+    def setPathState(self, path: Path | None, state: str, message: str) -> None:
+        self.current_path = str(path) if path else ""
+        if path:
+            self.name_label.setFullText(path.name)
+            self.path_label.setFullText(str(path))
+            self.choose_button.setText("Thay đổi")
+        else:
+            self.name_label.setFullText("Chưa chọn nguồn")
+            self.path_label.setFullText(
+                "Chọn thủ công hoặc đổi project để tự phát hiện."
+            )
+            self.choose_button.setText("Chọn nguồn")
+
+        badge_text, badge_state = {
+            "ready": ("Sẵn sàng", "ready"),
+            "error": ("Cần xử lý", "error"),
+            "warning": ("Chưa chọn", "warning"),
+        }.get(state, ("Chưa chọn", "neutral"))
+        self.badge.setText(badge_text)
+        self.badge.setProperty("badge", badge_state)
+        repolish(self.badge)
+        self.error_label.setText(message)
+        self.error_label.setVisible(bool(message) and state == "error")
+        self.copy_button.setEnabled(bool(path))
+        self.open_button.setEnabled(bool(path))
+
+    def setBusy(self, busy: bool) -> None:
+        self.choose_button.setDisabled(busy)
+        self.copy_button.setDisabled(busy or not self.current_path)
+        self.open_button.setDisabled(busy or not self.current_path)
+
+    def setCompact(self, compact: bool) -> None:
+        if compact:
+            self.copy_button.setText("")
+            self.copy_button.setFixedWidth(36)
+            self.copy_button.setToolTip("Copy đường dẫn")
+            self.open_button.setText("")
+            self.open_button.setFixedWidth(36)
+            self.open_button.setToolTip(f"Mở trong {FILE_MANAGER}")
+        else:
+            self.copy_button.setText("Copy")
+            self.copy_button.setMaximumWidth(16777215)
+            self.copy_button.setMinimumWidth(0)
+            self.open_button.setText(f"Mở {FILE_MANAGER}")
+            self.open_button.setMaximumWidth(16777215)
+            self.open_button.setMinimumWidth(0)
+
+    def contextMenuEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if not self.current_path:
+            return
+        menu = QMenu(self)
+        copy_action = menu.addAction(
+            make_icon("copy", THEME.secondary, 17), "Copy đường dẫn"
         )
-        self.tree.tag_configure(
-            "detail_heading", background=app.colors.elevated, foreground=app.colors.text
+        open_action = menu.addAction(
+            make_icon("open", THEME.secondary, 17), f"Mở trong {FILE_MANAGER}"
         )
+        selected = menu.exec(event.globalPos())
+        if selected == copy_action:
+            self.copyRequested.emit(self.current_path)
+        elif selected == open_action:
+            self.openRequested.emit(self.current_path)
 
-        self._load()
-        self.tree.bind("<Button-1>", self._on_click)
-        self.tree.bind("<Motion>", self._on_motion)
-        self.tree.bind("<Leave>", self._clear_hover)
-        self.tree.bind("<space>", self._on_space)
-        self.tree.bind("<Return>", self._on_return)
-        self.bind("<Configure>", self._resize_columns)
 
-    def _resize_columns(self, event: tk.Event) -> None:
-        fixed_width = 42 + 135 + 72 + 98 + 42 + 16
-        self.tree.column("preview", width=max(170, event.width - fixed_width))
+class ProjectSummaryCard(QFrame):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setProperty("card", True)
+        add_shadow(self, 24, 6)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+        title = QLabel("Tóm tắt project")
+        title.setProperty("role", "cardTitle")
+        self.project_name = ElideLabel("Chưa có project")
+        self.project_name.setProperty("role", "sectionTitle")
+        self.project_path = ElideLabel("")
+        self.project_path.setProperty("role", "path")
+        layout.addWidget(title)
+        layout.addWidget(self.project_name)
+        layout.addWidget(self.project_path)
+        self.rows: dict[str, QLabel] = {}
+        for key, label in (
+            ("content", "Content DOCX"),
+            ("video", "Video nguồn"),
+            ("audio", "File voice-over"),
+        ):
+            row = QHBoxLayout()
+            name = QLabel(label)
+            name.setProperty("role", "body")
+            value = QLabel("Chưa có")
+            value.setProperty("role", "caption")
+            row.addWidget(name)
+            row.addStretch(1)
+            row.addWidget(value)
+            layout.addLayout(row)
+            self.rows[key] = value
+        layout.addStretch(1)
 
-    def _load(self) -> None:
-        for index, component in enumerate(self.components):
-            ready = component_is_ready(component)
-            preview_values = list(component.timecodes[:2])
-            hidden = component.video_cut_count - len(preview_values)
-            if preview_values:
-                preview = ", ".join(preview_values)
-                if hidden:
-                    preview += f" và {hidden} đoạn khác"
+    def updateSummary(
+        self,
+        project: Path | None,
+        states: dict[str, tuple[str, str]],
+        video_count: int,
+        voiceover_count: int,
+    ) -> None:
+        self.project_name.setFullText(project.name if project else "Chưa có project")
+        self.project_path.setFullText(str(project) if project else "")
+        for key in ("content", "video", "audio"):
+            state = states[key][0]
+            if state == "ready":
+                if key == "video" and video_count:
+                    text = f"{video_count} video"
+                elif key == "audio" and voiceover_count:
+                    text = f"{voiceover_count} file"
+                else:
+                    text = "Đã tìm thấy"
+                color = THEME.success
+            elif state == "error":
+                text, color = "Có lỗi", THEME.error
             else:
-                preview = f"{component.text_block_count} khối lời đọc"
-            iid = f"component-{index}"
-            self.parent_iids.append(iid)
-            self.iid_to_index[iid] = index
-            self.tree.insert(
+                text, color = "Chưa có", THEME.warning
+            self.rows[key].setText(text)
+            self.rows[key].setStyleSheet(f"color: {color}; font-size: 12px;")
+
+
+class ExportSettingsCard(QFrame):
+    sequenceChanged = Signal(str)
+    chooseOutputRequested = Signal()
+    copyOutputRequested = Signal(str)
+    openOutputRequested = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setProperty("card", True)
+        add_shadow(self, 24, 6)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(10)
+        title = QLabel("Cấu hình xuất")
+        title.setProperty("role", "cardTitle")
+        layout.addWidget(title)
+        sequence_label = QLabel("Tên sequence")
+        sequence_label.setProperty("role", "caption")
+        self.sequence_edit = QLineEdit()
+        self.sequence_edit.setPlaceholderText("Tên sequence trong Premiere")
+        self.sequence_edit.textChanged.connect(self.sequenceChanged)
+        layout.addWidget(sequence_label)
+        layout.addWidget(self.sequence_edit)
+        output_label = QLabel("XML đầu ra")
+        output_label.setProperty("role", "caption")
+        self.output_name = ElideLabel("Chưa chọn vị trí lưu")
+        self.output_name.setProperty("role", "sectionTitle")
+        self.output_path = ElideLabel("")
+        self.output_path.setProperty("role", "path")
+        layout.addWidget(output_label)
+        layout.addWidget(self.output_name)
+        layout.addWidget(self.output_path)
+        actions = QHBoxLayout()
+        self.choose_button = QPushButton("Chọn vị trí lưu")
+        self.choose_button.setProperty("variant", "soft")
+        self.choose_button.clicked.connect(self.chooseOutputRequested)
+        self.copy_button = QPushButton()
+        self.copy_button.setProperty("variant", "icon")
+        self.copy_button.setIcon(make_icon("copy", THEME.secondary, 18))
+        self.copy_button.setToolTip("Copy đường dẫn XML")
+        self.copy_button.clicked.connect(
+            lambda: self.copyOutputRequested.emit(self.output_path.toolTip())
+        )
+        self.open_button = QPushButton()
+        self.open_button.setProperty("variant", "icon")
+        self.open_button.setIcon(make_icon("open", THEME.secondary, 18))
+        self.open_button.setToolTip(f"Mở trong {FILE_MANAGER}")
+        self.open_button.clicked.connect(
+            lambda: self.openOutputRequested.emit(self.output_path.toolTip())
+        )
+        actions.addWidget(self.choose_button)
+        actions.addStretch(1)
+        actions.addWidget(self.copy_button)
+        actions.addWidget(self.open_button)
+        layout.addLayout(actions)
+
+    def setValues(self, sequence: str, output: Path | None) -> None:
+        self.sequence_edit.blockSignals(True)
+        self.sequence_edit.setText(sequence)
+        self.sequence_edit.blockSignals(False)
+        self.output_name.setFullText(
+            output.name if output else "Chưa chọn vị trí lưu"
+        )
+        self.output_path.setFullText(str(output) if output else "")
+        self.copy_button.setEnabled(output is not None)
+        self.open_button.setEnabled(output is not None)
+
+    def setBusy(self, busy: bool) -> None:
+        self.sequence_edit.setDisabled(busy)
+        self.choose_button.setDisabled(busy)
+        self.copy_button.setDisabled(busy or not self.output_path.toolTip())
+        self.open_button.setDisabled(busy or not self.output_path.toolTip())
+
+
+class WelcomePage(QWidget):
+    chooseRequested = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(28, 28, 28, 28)
+        outer.addStretch(1)
+        card = QFrame()
+        card.setProperty("card", True)
+        card.setMinimumSize(560, 320)
+        card.setMaximumWidth(680)
+        add_shadow(card, 36, 10)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(38, 36, 38, 36)
+        card_layout.setSpacing(14)
+        icon_tile = IconTile("folder")
+        icon_tile.setFixedSize(58, 58)
+        card_layout.addWidget(icon_tile, 0, Qt.AlignmentFlag.AlignHCenter)
+        title = QLabel("Bắt đầu với một project")
+        title.setProperty("role", "title")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setMinimumHeight(42)
+        body = QLabel(
+            "Chọn thư mục chứa content DOCX, video và voice-over. "
+            "XML Cut Room sẽ tự tìm các nguồn hiện có."
+        )
+        body.setProperty("role", "body")
+        body.setWordWrap(True)
+        body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        body.setMinimumHeight(48)
+        self.notice = QLabel("Chưa chọn project")
+        self.notice.setProperty("role", "caption")
+        self.notice.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.choose_button = QPushButton("Chọn project")
+        self.choose_button.setProperty("variant", "primary")
+        self.choose_button.setIcon(make_icon("folder", "white", 18))
+        self.choose_button.clicked.connect(self.chooseRequested)
+        self.choose_button.setMaximumWidth(180)
+        card_layout.addWidget(title)
+        card_layout.addWidget(body)
+        card_layout.addWidget(self.notice)
+        card_layout.addWidget(
+            self.choose_button, 0, Qt.AlignmentFlag.AlignHCenter
+        )
+        outer.addWidget(card, 0, Qt.AlignmentFlag.AlignHCenter)
+        outer.addStretch(1)
+
+    def setNotice(self, text: str, error: bool = False) -> None:
+        self.notice.setText(text)
+        self.notice.setStyleSheet(
+            f"color: {THEME.error if error else THEME.secondary}; font-size: 12px;"
+        )
+
+
+class SetupPage(QScrollArea):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.content = QWidget()
+        self.setWidget(self.content)
+        outer = QVBoxLayout(self.content)
+        outer.setContentsMargins(28, 26, 28, 28)
+        outer.setSpacing(20)
+        outer.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
+        self.header = HeaderBlock(
+            "Bước 2",
+            "Chuẩn bị dữ liệu",
+            "Kiểm tra các nguồn trước khi tạo timeline Premiere.",
+        )
+        outer.addWidget(self.header)
+        self.notice = QLabel()
+        self.notice.setWordWrap(True)
+        self.notice.setProperty("role", "error")
+        self.notice.setStyleSheet(
+            f"background: {THEME.error_soft}; border-radius: 12px; "
+            f"padding: 10px 13px; color: {THEME.error};"
+        )
+        self.notice.hide()
+        outer.addWidget(self.notice)
+        self.grid = QGridLayout()
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setHorizontalSpacing(18)
+        self.grid.setVerticalSpacing(18)
+        self.source_cards = {
+            "content": SourceCard(
+                "content",
+                "file",
+                "Content DOCX",
+                "Cấu trúc bài, lời đọc và timecode video.",
+            ),
+            "video": SourceCard(
+                "video",
+                "video",
+                "Thư mục video",
+                "Sáu video nguồn tương ứng TH1–TH6.",
+            ),
+            "audio": SourceCard(
+                "audio",
+                "audio",
+                "Thư mục voice-over",
+                "Các file audio được sắp theo thứ tự tên.",
+            ),
+        }
+        self.summary = ProjectSummaryCard()
+        self.export = ExportSettingsCard()
+        for card in self.source_cards.values():
+            card.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
+        outer.addLayout(self.grid)
+        outer.addStretch(1)
+        self._compact: bool | None = None
+        self._reflow(False)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._reflow(event.size().width() < 900)
+
+    def _reflow(self, compact: bool) -> None:
+        if compact == self._compact:
+            return
+        self._compact = compact
+        while self.grid.count():
+            item = self.grid.takeAt(0)
+            if item.widget():
+                item.widget().setParent(self.content)
+        cards = list(self.source_cards.values())
+        for card in cards:
+            card.setCompact(compact)
+        if compact:
+            for row, card in enumerate(cards):
+                self.grid.addWidget(card, row, 0)
+            self.grid.addWidget(self.summary, 3, 0)
+            self.grid.addWidget(self.export, 4, 0)
+            self.grid.setColumnStretch(0, 1)
+            self.grid.setColumnStretch(1, 0)
+        else:
+            for row, card in enumerate(cards):
+                self.grid.addWidget(card, row, 0)
+            self.grid.addWidget(self.summary, 0, 1)
+            self.grid.addWidget(self.export, 1, 1, 2, 1)
+            self.grid.setColumnStretch(0, 2)
+            self.grid.setColumnStretch(1, 1)
+
+    def showNotice(self, text: str = "") -> None:
+        self.notice.setText(text)
+        self.notice.setVisible(bool(text))
+
+
+class StructureReview(QFrame):
+    selectionChanged = Signal()
+    openDocumentRequested = Signal()
+    copyDocumentRequested = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setProperty("card", True)
+        add_shadow(self, 24, 6)
+        self.components: list[ArticleComponent] = []
+        self._syncing = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(20, 16, 20, 14)
+        title_copy = QVBoxLayout()
+        title_copy.setSpacing(3)
+        title = QLabel("Thành phần bài")
+        title.setProperty("role", "cardTitle")
+        self.document_label = ElideLabel()
+        self.document_label.setProperty("role", "caption")
+        title_copy.addWidget(title)
+        title_copy.addWidget(self.document_label)
+        header_layout.addLayout(title_copy, 1)
+        self.open_button = QPushButton("Mở DOCX")
+        self.open_button.setIcon(make_icon("open", THEME.secondary, 17))
+        self.open_button.clicked.connect(self.openDocumentRequested)
+        self.copy_button = QPushButton("Copy đường dẫn")
+        self.copy_button.setIcon(make_icon("copy", THEME.secondary, 17))
+        self.copy_button.clicked.connect(self.copyDocumentRequested)
+        header_layout.addWidget(self.open_button)
+        header_layout.addWidget(self.copy_button)
+        layout.addWidget(header)
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(6)
+        self.tree.setHeaderLabels(
+            (
                 "",
-                "end",
-                iid=iid,
-                values=(
-                    "☐",
+                "Thành phần",
+                "Nội dung",
+                "Video cut",
+                "Text block",
+                "Trạng thái",
+            )
+        )
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setRootIsDecorated(True)
+        self.tree.setUniformRowHeights(False)
+        self.tree.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        header_view = self.tree.header()
+        header_view.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header_view.resizeSection(0, 42)
+        header_view.setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
+        header_view.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        for column in (3, 4, 5):
+            header_view.setSectionResizeMode(
+                column, QHeaderView.ResizeMode.ResizeToContents
+            )
+        self.tree.itemChanged.connect(self._item_changed)
+        self.tree.itemDoubleClicked.connect(
+            lambda item, _column: item.setExpanded(not item.isExpanded())
+        )
+        layout.addWidget(self.tree, 1)
+
+    def load(self, content: Path, components: list[ArticleComponent]) -> None:
+        self._syncing = True
+        self.tree.clear()
+        self.components = components
+        self.document_label.setFullText(str(content))
+        for index, component in enumerate(components):
+            ready = component_is_ready(component)
+            preview = ", ".join(component.timecodes[:2])
+            if len(component.timecodes) > 2:
+                preview += f" và {len(component.timecodes) - 2} đoạn khác"
+            if not preview:
+                preview = f"{component.text_block_count} khối lời đọc"
+            item = QTreeWidgetItem(
+                (
+                    "",
                     component.title,
                     preview,
-                    f"{component.video_cut_count} video",
-                    f"{component.text_block_count} voice-over",
-                    "✓  ›" if ready else "!  ›",
-                ),
-                tags=("valid" if ready else "invalid",),
-                open=False,
+                    str(component.video_cut_count),
+                    str(component.text_block_count),
+                    "Hợp lệ" if ready else "Cần kiểm tra",
+                )
             )
+            item.setData(0, Qt.ItemDataRole.UserRole, index)
+            flags = item.flags()
+            if ready:
+                item.setFlags(flags | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(0, Qt.CheckState.Unchecked)
+                item.setForeground(5, QColor(THEME.success))
+            else:
+                item.setFlags(flags & ~Qt.ItemFlag.ItemIsUserCheckable)
+                item.setForeground(5, QColor(THEME.error))
             if component.timecodes:
-                self.tree.insert(
-                    iid,
-                    "end",
-                    values=(
+                cuts = QTreeWidgetItem(
+                    (
                         "",
-                        "Video cut",
-                        f"{component.video_cut_count} đoạn timecode",
+                        "Chi tiết video",
+                        "   •   ".join(component.timecodes),
                         f"{component.video_cut_count} đoạn",
                         "",
                         "",
-                    ),
-                    tags=("detail_heading",),
-                )
-                for offset in range(0, len(component.timecodes), 3):
-                    group = component.timecodes[offset : offset + 3]
-                    self.tree.insert(
-                        iid,
-                        "end",
-                        values=("", "", "    ".join(group), "", "", ""),
-                        tags=("detail",),
                     )
-            self.tree.insert(
-                iid,
-                "end",
-                values=(
+                )
+                cuts.setForeground(2, QColor(THEME.secondary))
+                item.addChild(cuts)
+            text_detail = QTreeWidgetItem(
+                (
                     "",
-                    "Voice-over",
-                    f"Đã phát hiện {component.text_block_count} khối lời đọc",
+                    "Chi tiết lời đọc",
+                    f"Đã phát hiện {component.text_block_count} text block trong DOCX",
                     "",
-                    f"{component.text_block_count} khối",
+                    str(component.text_block_count),
                     "",
-                ),
-                tags=("detail",),
+                )
+            )
+            text_detail.setForeground(2, QColor(THEME.secondary))
+            item.addChild(text_detail)
+            self.tree.addTopLevelItem(item)
+        self._syncing = False
+        self.selectionChanged.emit()
+
+    def _item_changed(self, item: QTreeWidgetItem, _column: int) -> None:
+        if self._syncing or item.parent() is not None:
+            return
+        index = item.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(index, int) and not component_is_ready(self.components[index]):
+            self._syncing = True
+            item.setCheckState(0, Qt.CheckState.Unchecked)
+            self._syncing = False
+        self.selectionChanged.emit()
+
+    def setAllValid(self, checked: bool) -> None:
+        self._syncing = True
+        for index in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(index)
+            if component_is_ready(self.components[index]):
+                item.setCheckState(
+                    0,
+                    Qt.CheckState.Checked
+                    if checked
+                    else Qt.CheckState.Unchecked,
+                )
+        self._syncing = False
+        self.selectionChanged.emit()
+
+    def selectionStats(self) -> tuple[int, int, bool]:
+        total = self.tree.topLevelItemCount()
+        selected = sum(
+            self.tree.topLevelItem(index).checkState(0) == Qt.CheckState.Checked
+            for index in range(total)
+        )
+        all_ready = bool(self.components) and all(
+            component_is_ready(component) for component in self.components
+        )
+        return selected, total, all_ready
+
+    def collapseAllDetails(self) -> bool:
+        expanded = any(
+            self.tree.topLevelItem(index).isExpanded()
+            for index in range(self.tree.topLevelItemCount())
+        )
+        if expanded:
+            self.tree.collapseAll()
+        return expanded
+
+
+class ReviewPage(QWidget):
+    selectAllChanged = Signal(bool)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 22)
+        layout.setSpacing(16)
+        self.header = HeaderBlock(
+            "Bước 3",
+            "Kiểm tra cấu trúc",
+            "Xác nhận các phần được đọc từ content DOCX trước khi xuất.",
+        )
+        layout.addWidget(self.header)
+        summary = QFrame()
+        summary.setProperty("card", True)
+        summary_layout = QHBoxLayout(summary)
+        summary_layout.setContentsMargins(18, 12, 18, 12)
+        summary_layout.setSpacing(18)
+        self.component_metric = QLabel()
+        self.cut_metric = QLabel()
+        self.text_metric = QLabel()
+        self.voice_metric = QLabel()
+        for metric in (
+            self.component_metric,
+            self.cut_metric,
+            self.text_metric,
+            self.voice_metric,
+        ):
+            metric.setProperty("role", "body")
+            summary_layout.addWidget(metric)
+        summary_layout.addStretch(1)
+        self.selection_label = QLabel()
+        self.selection_label.setProperty("role", "caption")
+        self.select_all = QCheckBox("Chọn tất cả phần hợp lệ")
+        self.select_all.toggled.connect(self.selectAllChanged)
+        summary_layout.addWidget(self.selection_label)
+        summary_layout.addWidget(self.select_all)
+        layout.addWidget(summary)
+        self.structure = StructureReview()
+        layout.addWidget(self.structure, 1)
+
+    def updateSummary(
+        self,
+        components: list[ArticleComponent],
+        voiceover_files: int,
+        selected: int,
+    ) -> None:
+        total = len(components)
+        cuts = sum(component.video_cut_count for component in components)
+        text_blocks = sum(component.text_block_count for component in components)
+        self.component_metric.setText(f"{total} thành phần")
+        self.cut_metric.setText(f"{cuts} video cut")
+        self.text_metric.setText(f"{text_blocks} text block")
+        self.voice_metric.setText(f"{voiceover_files} file voice-over")
+        self.selection_label.setText(f"Đã chọn {selected}/{total}")
+        self.select_all.blockSignals(True)
+        self.select_all.setChecked(bool(total and selected == total))
+        self.select_all.blockSignals(False)
+
+
+class ResultPage(QWidget):
+    openRequested = Signal()
+    copyRequested = Signal()
+    backRequested = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 28, 28, 28)
+        layout.setSpacing(20)
+        self.header = HeaderBlock(
+            "Hoàn tất",
+            "XML đã sẵn sàng",
+            "Timeline đã được tạo và kiểm tra bằng dữ liệu thực tế.",
+        )
+        layout.addWidget(self.header)
+        card = QFrame()
+        card.setProperty("card", True)
+        add_shadow(card, 30, 8)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(28, 26, 28, 26)
+        card_layout.setSpacing(15)
+        heading = QHBoxLayout()
+        heading.addWidget(IconTile("check"))
+        copy = QVBoxLayout()
+        title = QLabel("Xuất XML thành công")
+        title.setProperty("role", "cardTitle")
+        self.summary_label = QLabel()
+        self.summary_label.setProperty("role", "body")
+        self.summary_label.setWordWrap(True)
+        copy.addWidget(title)
+        copy.addWidget(self.summary_label)
+        heading.addLayout(copy, 1)
+        card_layout.addLayout(heading)
+        self.output_name = ElideLabel()
+        self.output_name.setProperty("role", "sectionTitle")
+        self.output_path = ElideLabel()
+        self.output_path.setProperty("role", "path")
+        card_layout.addWidget(self.output_name)
+        card_layout.addWidget(self.output_path)
+        actions = QHBoxLayout()
+        open_button = QPushButton(f"Mở trong {FILE_MANAGER}")
+        open_button.setProperty("variant", "primary")
+        open_button.setIcon(make_icon("open", "white", 18))
+        open_button.clicked.connect(self.openRequested)
+        copy_button = QPushButton("Copy đường dẫn")
+        copy_button.setIcon(make_icon("copy", THEME.secondary, 18))
+        copy_button.clicked.connect(self.copyRequested)
+        back_button = QPushButton("Quay lại cấu hình")
+        back_button.clicked.connect(self.backRequested)
+        actions.addWidget(open_button)
+        actions.addWidget(copy_button)
+        actions.addStretch(1)
+        actions.addWidget(back_button)
+        card_layout.addLayout(actions)
+        layout.addWidget(card)
+        layout.addStretch(1)
+
+    def setSummary(self, summary: SimpleGenerationSummary) -> None:
+        self.summary_label.setText(
+            f"{summary.video_cut_count} video cut · "
+            f"{summary.narration_count} voice-over · "
+            f"{summary.duration_seconds:.2f} giây · {summary.fps} fps"
+        )
+        self.output_name.setFullText(summary.output.name)
+        self.output_path.setFullText(str(summary.output))
+
+
+class Sidebar(QFrame):
+    changeProjectRequested = Signal()
+    logRequested = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("Sidebar")
+        self.setFixedWidth(220)
+        self.setStyleSheet(
+            "QFrame#Sidebar { background: rgba(255, 255, 255, 0.68); "
+            "border-right: 1px solid rgba(220, 229, 240, 0.8); }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 20, 16, 16)
+        layout.setSpacing(16)
+        brand = QHBoxLayout()
+        logo_label = QLabel()
+        logo_path = bundled_asset("xmlcutroom-logo.png")
+        if logo_path:
+            logo_label.setPixmap(
+                QPixmap(str(logo_path)).scaled(
+                    38,
+                    38,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        else:
+            logo_label.setPixmap(make_icon("grid", THEME.accent, 30).pixmap(38, 38))
+        brand_name = QLabel("XML Cut Room")
+        brand_name.setStyleSheet(
+            f"font-size: 16px; font-weight: 600; color: {THEME.text};"
+        )
+        brand.addWidget(logo_label)
+        brand.addWidget(brand_name)
+        brand.addStretch(1)
+        layout.addLayout(brand)
+
+        self.project_card = QFrame()
+        self.project_card.setObjectName("ProjectCard")
+        self.project_card.setStyleSheet(
+            f"QFrame#ProjectCard {{ background: white; "
+            f"border: 1px solid {THEME.border}; border-radius: 16px; }}"
+        )
+        project_layout = QVBoxLayout(self.project_card)
+        project_layout.setContentsMargins(13, 12, 13, 12)
+        project_layout.setSpacing(5)
+        project_caption = QLabel("PROJECT HIỆN TẠI")
+        project_caption.setProperty("role", "eyebrow")
+        self.project_name = ElideLabel("Chưa chọn")
+        self.project_name.setStyleSheet(
+            f"font-size: 13px; font-weight: 500; color: {THEME.text};"
+        )
+        self.project_status = QLabel("Cần chọn project")
+        self.project_status.setProperty("role", "caption")
+        self.change_button = QPushButton("Đổi project")
+        self.change_button.setProperty("variant", "soft")
+        self.change_button.clicked.connect(self.changeProjectRequested)
+        project_layout.addWidget(project_caption)
+        project_layout.addWidget(self.project_name)
+        project_layout.addWidget(self.project_status)
+        project_layout.addWidget(self.change_button)
+        layout.addWidget(self.project_card)
+
+        steps_label = QLabel("QUY TRÌNH")
+        steps_label.setProperty("role", "caption")
+        layout.addWidget(steps_label)
+        self.step_rows: list[tuple[QFrame, QLabel, QLabel]] = []
+        icons = ("folder", "grid", "review", "export")
+        for index, (title, icon_name) in enumerate(
+            zip(STEP_TITLES, icons, strict=True)
+        ):
+            row = QFrame()
+            row.setObjectName("StepRow")
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(11, 9, 11, 9)
+            row_layout.setSpacing(10)
+            icon = QLabel()
+            icon.setFixedSize(22, 22)
+            icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label = QLabel(f"{index + 1}. {title}")
+            row_layout.addWidget(icon)
+            row_layout.addWidget(label, 1)
+            layout.addWidget(row)
+            self.step_rows.append((row, icon, label))
+
+        layout.addStretch(1)
+        log_button = QPushButton("Nhật ký")
+        log_button.setIcon(make_icon("log", THEME.secondary, 18))
+        log_button.clicked.connect(self.logRequested)
+        layout.addWidget(log_button)
+        version = QLabel("Phiên bản 3.0 · PySide6")
+        version.setProperty("role", "caption")
+        version.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(version)
+
+    def updateState(
+        self,
+        project: Path | None,
+        project_status: str,
+        states: list[str],
+    ) -> None:
+        self.project_name.setFullText(project.name if project else "Chưa chọn")
+        self.project_status.setText(project_status)
+        self.change_button.setText("Đổi project" if project else "Chọn project")
+        icons = ("folder", "grid", "review", "export")
+        for index, (state, parts) in enumerate(
+            zip(states, self.step_rows, strict=True)
+        ):
+            row, icon, label = parts
+            if state == "current":
+                background, foreground = THEME.navy, "white"
+                icon_name = icons[index]
+            elif state == "complete":
+                background, foreground = "transparent", THEME.success
+                icon_name = "check"
+            elif state == "error":
+                background, foreground = THEME.error_soft, THEME.error
+                icon_name = icons[index]
+            else:
+                background, foreground = "transparent", THEME.tertiary
+                icon_name = icons[index]
+            row.setStyleSheet(
+                f"QFrame#StepRow {{ background: {background}; "
+                "border-radius: 13px; }"
+            )
+            icon.setPixmap(make_icon(icon_name, foreground, 20).pixmap(20, 20))
+            label.setStyleSheet(
+                f"font-size: 13px; color: {foreground}; "
+                f"font-weight: {'500' if state == 'current' else '400'};"
             )
 
-    def _main_iid_at(self, y: int) -> str:
-        iid = self.tree.identify_row(y)
-        return iid if iid in self.iid_to_index else ""
 
-    def _on_click(self, event: tk.Event) -> str | None:
-        iid = self._main_iid_at(event.y)
-        if not iid:
-            return None
-        column = self.tree.identify_column(event.x)
-        if column == "#6":
-            self.tree.item(iid, open=not bool(self.tree.item(iid, "open")))
-            self._refresh_iid(iid)
-            return "break"
-        self.toggle_iid(iid)
-        self.tree.focus(iid)
-        return "break"
+class LogPanel(QFrame):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setProperty("card", True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(8)
+        heading = QHBoxLayout()
+        title = QLabel("Nhật ký")
+        title.setProperty("role", "sectionTitle")
+        copy_button = QPushButton("Copy")
+        copy_button.setIcon(make_icon("copy", THEME.secondary, 17))
+        copy_button.clicked.connect(self.copy)
+        clear_button = QPushButton("Xóa")
+        clear_button.clicked.connect(self.clear)
+        heading.addWidget(title)
+        heading.addStretch(1)
+        heading.addWidget(copy_button)
+        heading.addWidget(clear_button)
+        layout.addLayout(heading)
+        self.text = QPlainTextEdit()
+        self.text.setReadOnly(True)
+        self.text.setMaximumHeight(150)
+        layout.addWidget(self.text)
 
-    def _on_space(self, _event: tk.Event) -> str:
-        iid = self.tree.focus()
-        if iid in self.iid_to_index:
-            self.toggle_iid(iid)
-        return "break"
-
-    def _on_return(self, _event: tk.Event) -> str:
-        iid = self.tree.focus()
-        if iid in self.iid_to_index:
-            self.tree.item(iid, open=not bool(self.tree.item(iid, "open")))
-        return "break"
-
-    def _on_motion(self, event: tk.Event) -> None:
-        iid = self._main_iid_at(event.y)
-        if iid == self.hover_iid:
-            return
-        old = self.hover_iid
-        self.hover_iid = iid
-        if old:
-            self._refresh_iid(old)
-        if iid:
-            self._refresh_iid(iid)
-
-    def _clear_hover(self, _event: tk.Event | None = None) -> None:
-        old = self.hover_iid
-        self.hover_iid = ""
-        if old:
-            self._refresh_iid(old)
-
-    def _refresh_iid(self, iid: str) -> None:
-        index = self.iid_to_index[iid]
-        component = self.components[index]
-        variable = self.app.review_variables[index]
-        tags: tuple[str, ...]
-        if variable.get():
-            tags = ("checked",)
-        elif iid == self.hover_iid:
-            tags = ("hover",)
-        else:
-            tags = ("valid" if component_is_ready(component) else "invalid",)
-        values = list(self.tree.item(iid, "values"))
-        values[0] = "☑" if variable.get() else "☐"
-        values[-1] = (
-            "✓" if component_is_ready(component) else "!"
-        ) + ("  ▾" if self.tree.item(iid, "open") else "  ›")
-        self.tree.item(iid, values=values, tags=tags)
-
-    def toggle_iid(self, iid: str) -> None:
-        index = self.iid_to_index[iid]
-        component = self.components[index]
-        if not component_is_ready(component):
-            self.app._show_error(f"{component.title} chưa đủ dữ liệu để xác nhận")
-            return
-        variable = self.app.review_variables[index]
-        variable.set(not variable.get())
-        self._refresh_iid(iid)
-        self.app._update_confirm_state()
-
-    def refresh_all(self) -> None:
-        for iid in self.parent_iids:
-            self._refresh_iid(iid)
-
-    def collapse_all(self) -> bool:
-        changed = False
-        for iid in self.parent_iids:
-            if self.tree.item(iid, "open"):
-                self.tree.item(iid, open=False)
-                changed = True
-        return changed
-
-
-class BottomActionBar(tk.Frame):
-    def __init__(self, parent: tk.Misc, app: "XmlGeneratorApp") -> None:
-        super().__init__(
-            parent,
-            bg=app.colors.window,
-            height=LayoutTokens.ACTION_HEIGHT,
-            highlightthickness=0,
-        )
-        self.app = app
-        self.grid_propagate(False)
-        self.grid_columnconfigure(0, weight=1)
-
-        tk.Frame(self, bg=app.colors.separator, height=1).place(
-            relx=0, rely=0, relwidth=1, anchor="nw"
-        )
-        left = tk.Frame(self, bg=app.colors.window)
-        left.grid(row=0, column=0, sticky="w", padx=16, pady=12)
-        self.status_label = ttk.Label(
-            left,
-            textvariable=app.action_status_var,
-            style="ActionStatus.TLabel",
-        )
-        self.status_label.pack(anchor="w")
-        self.progress = ttk.Progressbar(
-            left,
-            mode="indeterminate",
-            style="CutRoom.Horizontal.TProgressbar",
-            length=220,
-        )
-
-        self.buttons = tk.Frame(self, bg=app.colors.window)
-        self.buttons.grid(row=0, column=1, sticky="e", padx=16, pady=15)
-
-    def show_setup(self) -> None:
-        for child in self.buttons.winfo_children():
-            child.grid_forget()
-        self.app.review_button.grid(row=0, column=0, padx=(0, 8))
-        self.app.generate_button.grid(row=0, column=1)
-
-    def show_review(self) -> None:
-        for child in self.buttons.winfo_children():
-            child.grid_forget()
-        self.app.back_action_button.grid(row=0, column=0, padx=(0, 8))
-        self.app.confirm_button.grid(row=0, column=1)
-
-
-class LogPanel(tk.Frame):
-    def __init__(self, parent: tk.Misc, app: "XmlGeneratorApp") -> None:
-        super().__init__(parent, bg=app.colors.elevated, highlightthickness=0)
-        self.app = app
-        header = tk.Frame(self, bg=app.colors.elevated, height=36)
-        header.pack(fill="x")
-        header.pack_propagate(False)
-        ttk.Label(header, text="Nhật ký", style="LogHeader.TLabel").pack(
-            side="left", padx=12, pady=9
-        )
-        ttk.Button(
-            header,
-            text="Xóa",
-            command=self.clear,
-            style="Small.TButton",
-            takefocus=True,
-        ).pack(side="right", padx=(4, 10), pady=5)
-        ttk.Button(
-            header,
-            text="Copy",
-            command=self.copy,
-            style="Small.TButton",
-            takefocus=True,
-        ).pack(side="right", pady=5)
-        tk.Frame(self, bg=app.colors.separator, height=1).pack(fill="x")
-        self.text = tk.Text(
-            self,
-            bg=app.colors.input,
-            fg=app.colors.secondary,
-            insertbackground=app.colors.text,
-            selectbackground=app.colors.selection,
-            selectforeground="#FFFFFF",
-            font=TypeTokens.MONO_SMALL,
-            borderwidth=0,
-            highlightthickness=0,
-            padx=12,
-            pady=8,
-            wrap="word",
-            state="disabled",
-        )
-        self.text.pack(fill="both", expand=True)
-        self.text.tag_configure("success", foreground=app.colors.success)
-        self.text.tag_configure("warning", foreground=app.colors.warning)
-        self.text.tag_configure("error", foreground=app.colors.error)
-        self.text.tag_configure("info", foreground=app.colors.secondary)
-
-    def append(self, message: str, level: str) -> None:
-        icons = {"success": "✓", "warning": "!", "error": "!", "info": "i"}
-        self.text.configure(state="normal")
-        self.text.insert("end", f"{icons.get(level, 'i')}  {message}\n", level)
-        self.text.see("end")
-        self.text.configure(state="disabled")
-
-    def clear(self) -> None:
-        self.text.configure(state="normal")
-        self.text.delete("1.0", "end")
-        self.text.configure(state="disabled")
+    def append(self, message: str, level: str = "info") -> None:
+        prefix = {
+            "success": "✓",
+            "warning": "!",
+            "error": "!",
+            "info": "·",
+        }.get(level, "·")
+        self.text.appendPlainText(f"{prefix}  {message}")
+        scrollbar = self.text.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def copy(self) -> None:
-        value = self.text.get("1.0", "end-1c")
-        if value:
-            self.app._copy_value(value, log_event=False)
+        QApplication.clipboard().setText(self.text.toPlainText())
+
+    def clear(self) -> None:
+        self.text.clear()
 
 
-@dataclass
-class FieldView:
-    key: str
-    variable: tk.StringVar
-    entry: ttk.Entry
-    helper_label: tk.Label
-    status_label: tk.Label
-    default_helper: str
-    kind: str
+class ActionBar(QFrame):
+    primaryRequested = Signal()
+    secondaryRequested = Signal()
 
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("ActionBar")
+        self.setStyleSheet(
+            "QFrame#ActionBar { background: rgba(255, 255, 255, 0.82); "
+            f"border-top: 1px solid {THEME.border}; }}"
+        )
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(24, 12, 24, 12)
+        layout.setSpacing(10)
+        status_area = QVBoxLayout()
+        status_area.setSpacing(5)
+        self.status = QLabel()
+        self.status.setProperty("role", "caption")
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setMaximumWidth(250)
+        self.progress.hide()
+        status_area.addWidget(self.status)
+        status_area.addWidget(self.progress)
+        layout.addLayout(status_area, 1)
+        self.secondary = QPushButton()
+        self.secondary.clicked.connect(self.secondaryRequested)
+        self.primary = QPushButton()
+        self.primary.setProperty("variant", "primary")
+        self.primary.clicked.connect(self.primaryRequested)
+        layout.addWidget(self.secondary)
+        layout.addWidget(self.primary)
 
-class XmlGeneratorApp:
-    def __init__(self, root: tk.Tk) -> None:
-        self.root = root
-        self.dark_mode = detect_dark_mode()
-        self.colors = DARK_COLORS if self.dark_mode else LIGHT_COLORS
-        self.root.title("XML Cut Room")
-        icon_path = bundled_asset("xmlcutroom-logo.png")
-        if icon_path is not None:
-            try:
-                self.app_icon = tk.PhotoImage(file=icon_path)
-                self.root.iconphoto(True, self.app_icon)
-            except tk.TclError:
-                self.app_icon = None
-        self.root.geometry("1280x800")
-        self.root.minsize(LayoutTokens.MIN_WIDTH, LayoutTokens.MIN_HEIGHT)
-        self.root.configure(bg=self.colors.window)
-        self._configure_native_window()
-
-        self.project_var = tk.StringVar()
-        self.content_var = tk.StringVar()
-        self.video_var = tk.StringVar()
-        self.audio_var = tk.StringVar()
-        self.output_var = tk.StringVar()
-        self.sequence_var = tk.StringVar(value="Bài 0509")
-        self.status_var = tk.StringVar(value="Chưa chọn project")
-        self.action_status_var = tk.StringVar(value="Chọn project để bắt đầu")
-        self.review_footer_var = tk.StringVar(value="Đã chọn 0 trong 8 thành phần")
-        self.project_name_var = tk.StringVar(value="Chưa có project")
-        self.project_badge_var = tk.StringVar(value="Chưa sẵn sàng")
-
-        self.verified_content: Path | None = None
-        self.is_running = False
-        self.is_review_loading = False
-        self.generation_success = False
-        self.generation_error = False
-        self.current_page = "setup"
-        self.log_expanded = False
-        self.field_views: dict[str, FieldView] = {}
-        self.review_components: list[ArticleComponent] = []
-        self.review_variables: list[tk.BooleanVar] = []
-        self.review_path: Path | None = None
-        self.review_page: tk.Frame | None = None
-        self.structure_list: StructureList | None = None
-        self.summary_bar: SummaryBar | None = None
-        self._toast: tk.Toplevel | None = None
-        self._suspend_trace = False
-        self._worker_results: queue.Queue[tuple[str, object]] = queue.Queue()
-
-        self._configure_ttk()
-        self._build()
-        for variable in (
-            self.project_var,
-            self.content_var,
-            self.video_var,
-            self.audio_var,
-            self.output_var,
-            self.sequence_var,
-        ):
-            variable.trace_add("write", self._inputs_changed)
-        self._bind_shortcuts()
-        self._load_initial_project()
-        self._update_generate_state()
-
-    def _configure_native_window(self) -> None:
-        if sys.platform != "darwin":
-            return
-        try:
-            self.root.tk.call(
-                "tk::unsupported::MacWindowStyle",
-                "style",
-                self.root._w,
-                "document",
-                "closeBox collapseBox resizable",
-            )
-        except tk.TclError:
-            pass
-
-    def _configure_ttk(self) -> None:
-        style = ttk.Style(self.root)
-        style.theme_use("clam")
-        c = self.colors
-        style.configure("TFrame", background=c.content)
-        style.configure(
-            "TLabel", background=c.content, foreground=c.text, font=TypeTokens.BODY
-        )
-        style.configure(
-            "ToolbarTitle.TLabel",
-            background=c.window,
-            foreground=c.text,
-            font=TypeTokens.ROW,
-        )
-        style.configure(
-            "ActionStatus.TLabel",
-            background=c.window,
-            foreground=c.secondary,
-            font=TypeTokens.SECONDARY,
-        )
-        style.configure(
-            "LogHeader.TLabel",
-            background=c.elevated,
-            foreground=c.text,
-            font=TypeTokens.ROW,
-        )
-        style.configure(
-            "TButton",
-            background=c.elevated,
-            foreground=c.text,
-            bordercolor=c.separator,
-            lightcolor=c.elevated,
-            darkcolor=c.elevated,
-            focuscolor=c.accent,
-            focusthickness=1,
-            padding=(14, 6),
-            font=TypeTokens.BUTTON,
-        )
-        style.map(
-            "TButton",
-            background=[("active", c.hover), ("pressed", c.input)],
-            foreground=[("disabled", c.disabled)],
-            bordercolor=[("focus", c.accent), ("active", c.secondary)],
-        )
-        style.configure(
-            "Primary.TButton",
-            background=c.accent,
-            foreground="#FFFFFF",
-            bordercolor=c.accent,
-            lightcolor=c.accent,
-            darkcolor=c.accent,
-            padding=(16, 6),
-            font=TypeTokens.BUTTON,
-        )
-        style.map(
-            "Primary.TButton",
-            background=[
-                ("disabled", c.elevated),
-                ("pressed", "#0068D7"),
-                ("active", c.selection),
-            ],
-            foreground=[("disabled", c.disabled)],
-            bordercolor=[("disabled", c.separator), ("focus", c.text)],
-            lightcolor=[("disabled", c.elevated)],
-            darkcolor=[("disabled", c.elevated)],
-        )
-        style.configure(
-            "Icon.TButton",
-            padding=(8, 2),
-            font=(TypeTokens.UI, 20),
-            background=c.window,
-            bordercolor=c.window,
-        )
-        style.configure(
-            "ToolbarIcon.TButton",
-            padding=(7, 3),
-            font=(TypeTokens.UI, 12, "bold"),
-            background=c.window,
-            bordercolor=c.window,
-        )
-        style.configure(
-            "Small.TButton",
-            padding=(9, 3),
-            font=TypeTokens.SECONDARY,
-            background=c.elevated,
-        )
-        style.configure(
-            "Field.TEntry",
-            fieldbackground=c.input,
-            foreground=c.text,
-            insertcolor=c.text,
-            bordercolor=c.separator,
-            lightcolor=c.separator,
-            darkcolor=c.separator,
-            padding=(9, 7),
-            font=TypeTokens.MONO_SMALL,
-        )
-        style.configure("Valid.Field.TEntry", bordercolor=c.success)
-        style.configure("Error.Field.TEntry", bordercolor=c.error)
-        for entry_style, border in (
-            ("Field.TEntry", c.separator),
-            ("Valid.Field.TEntry", c.success),
-            ("Error.Field.TEntry", c.error),
-        ):
-            style.map(
-                entry_style,
-                bordercolor=[("focus", c.accent), ("active", border)],
-                lightcolor=[("focus", c.accent)],
-                darkcolor=[("focus", c.accent)],
-            )
-        style.configure(
-            "Summary.TCheckbutton",
-            background=c.elevated,
-            foreground=c.text,
-            font=TypeTokens.BODY,
-            padding=(4, 2),
-            focuscolor=c.accent,
-        )
-        style.map(
-            "Summary.TCheckbutton",
-            background=[("active", c.elevated)],
-            foreground=[("disabled", c.disabled)],
-        )
-        style.configure(
-            "Structure.Treeview",
-            background=c.content,
-            fieldbackground=c.content,
-            foreground=c.text,
-            bordercolor=c.separator,
-            lightcolor=c.separator,
-            darkcolor=c.separator,
-            relief="flat",
-            rowheight=LayoutTokens.ROW_HEIGHT,
-            font=TypeTokens.BODY,
-        )
-        style.configure(
-            "Structure.Treeview.Heading",
-            background=c.elevated,
-            foreground=c.secondary,
-            bordercolor=c.separator,
-            relief="flat",
-            padding=(7, 6),
-            font=TypeTokens.SECONDARY,
-        )
-        style.map(
-            "Structure.Treeview.Heading",
-            background=[("active", c.hover)],
-        )
-        style.configure(
-            "CutRoom.Vertical.TScrollbar",
-            background=c.elevated,
-            troughcolor=c.content,
-            bordercolor=c.content,
-            arrowcolor=c.tertiary,
-            width=11,
-        )
-        style.configure(
-            "CutRoom.Horizontal.TProgressbar",
-            background=c.accent,
-            troughcolor=c.separator,
-            bordercolor=c.window,
-            lightcolor=c.accent,
-            darkcolor=c.accent,
-            thickness=3,
-        )
-
-    def _build(self) -> None:
-        shell = tk.Frame(self.root, bg=self.colors.window)
-        shell.pack(fill="both", expand=True)
-        shell.grid_rowconfigure(0, weight=1)
-        shell.grid_columnconfigure(1, weight=1)
-        self.shell = shell
-
-        self.sidebar = Sidebar(shell, self)
-        self.sidebar.grid(row=0, column=0, sticky="nsew")
-
-        workspace = tk.Frame(shell, bg=self.colors.content)
-        workspace.grid(row=0, column=1, sticky="nsew")
-        workspace.grid_columnconfigure(0, weight=1)
-        workspace.grid_rowconfigure(1, weight=1)
-        self.workspace = workspace
-
-        self.toolbar = Toolbar(workspace, self)
-        self.toolbar.grid(row=0, column=0, sticky="ew")
-
-        self.main_pane = tk.PanedWindow(
-            workspace,
-            orient="vertical",
-            bg=self.colors.separator,
-            sashwidth=5,
-            sashrelief="flat",
-            borderwidth=0,
-        )
-        self.main_pane.grid(row=1, column=0, sticky="nsew")
-        self.view_host = tk.Frame(self.main_pane, bg=self.colors.content)
-        self.main_pane.add(self.view_host, minsize=320, stretch="always")
-
-        self.setup_page = tk.Frame(self.view_host, bg=self.colors.content)
-        self.setup_page.grid(row=0, column=0, sticky="nsew")
-        self.view_host.grid_rowconfigure(0, weight=1)
-        self.view_host.grid_columnconfigure(0, weight=1)
-        self._build_setup_page()
-
-        self.log_panel = LogPanel(self.main_pane, self)
-        self.log_text = self.log_panel.text
-
-        self.action_bar = BottomActionBar(workspace, self)
-        self.action_bar.grid(row=2, column=0, sticky="ew")
-        self.review_button = ttk.Button(
-            self.action_bar.buttons,
-            text="Kiểm tra cấu trúc",
-            command=self._review_content,
-            style="TButton",
-            takefocus=True,
-        )
-        self.generate_button = ttk.Button(
-            self.action_bar.buttons,
-            text="Tạo XML",
-            command=self._generate,
-            style="Primary.TButton",
-            takefocus=True,
-        )
-        self.back_action_button = ttk.Button(
-            self.action_bar.buttons,
-            text="Quay lại",
-            command=self._cancel_review,
-            style="TButton",
-            takefocus=True,
-        )
-        self.confirm_button = ttk.Button(
-            self.action_bar.buttons,
-            text="Xác nhận",
-            command=self._confirm_review,
-            style="Primary.TButton",
-            takefocus=True,
-        )
-        Tooltip(self.generate_button, self._blocked_reason, self.colors)
-        Tooltip(
-            self.confirm_button,
-            lambda: "Chọn đủ các thành phần hợp lệ để xác nhận.",
-            self.colors,
-        )
-        self.progress = self.action_bar.progress
-        self.action_bar.show_setup()
-
-    def _build_setup_page(self) -> None:
-        page = self.setup_page
-        page.grid_columnconfigure(0, weight=1)
-        page.grid_rowconfigure(2, weight=1)
-        header = tk.Frame(page, bg=self.colors.content)
-        header.grid(
-            row=0,
-            column=0,
-            sticky="ew",
-            padx=LayoutTokens.CONTENT_PAD_X,
-            pady=(LayoutTokens.CONTENT_PAD_Y, 13),
-        )
-        tk.Label(
-            header,
-            text="BƯỚC 2 TRÊN 4",
-            bg=self.colors.content,
-            fg=self.colors.secondary,
-            font=(TypeTokens.UI, 10, "bold"),
-            anchor="w",
-        ).pack(fill="x")
-        tk.Label(
-            header,
-            text="Chuẩn bị dữ liệu",
-            bg=self.colors.content,
-            fg=self.colors.text,
-            font=TypeTokens.TITLE,
-            anchor="w",
-        ).pack(fill="x", pady=(4, 2))
-        tk.Label(
-            header,
-            text="Kiểm tra nguồn đầu vào trước khi tạo timeline Premiere.",
-            bg=self.colors.content,
-            fg=self.colors.secondary,
-            font=TypeTokens.BODY,
-            anchor="w",
-        ).pack(fill="x")
-
-        tk.Frame(page, bg=self.colors.separator, height=1).grid(
-            row=1,
-            column=0,
-            sticky="ew",
-            padx=LayoutTokens.CONTENT_PAD_X,
-        )
-        form = tk.Frame(page, bg=self.colors.content)
-        form.grid(
-            row=2,
-            column=0,
-            sticky="nsew",
-            padx=LayoutTokens.CONTENT_PAD_X,
-            pady=(5, 8),
-        )
-        form.grid_columnconfigure(1, weight=1)
-        fields = (
-            (
-                "content",
-                "Content DOCX",
-                self.content_var,
-                "file",
-                self._browse_content,
-                "Chứa cấu trúc và timecode bài.",
-            ),
-            (
-                "video",
-                "Thư mục video",
-                self.video_var,
-                "folder",
-                self._browse_video,
-                "Chứa đúng video 1-6 hoặc TH1-TH6.",
-            ),
-            (
-                "audio",
-                "Thư mục voice-over",
-                self.audio_var,
-                "folder",
-                self._browse_audio,
-                "Toàn bộ file sẽ được đặt theo thứ tự tên.",
-            ),
-        )
-        for row_index, (key, label, variable, kind, command, helper) in enumerate(fields):
-            self._build_field_row(
-                form,
-                row_index,
-                key,
-                label,
-                variable,
-                kind,
-                command,
-                helper,
-            )
-
-    def _build_field_row(
+    def configure(
         self,
-        parent: tk.Frame,
-        row_index: int,
-        key: str,
-        label: str,
-        variable: tk.StringVar,
-        kind: str,
-        command: Callable[[], None] | None,
-        helper: str,
+        status: str,
+        primary: str,
+        secondary: str = "",
+        enabled: bool = True,
+        busy: bool = False,
     ) -> None:
-        row = tk.Frame(parent, bg=self.colors.content, height=66)
-        row.grid(row=row_index, column=0, columnspan=2, sticky="ew")
-        row.grid_propagate(False)
-        row.grid_columnconfigure(1, weight=1)
-        tk.Label(
-            row,
-            text=label,
-            bg=self.colors.content,
-            fg=self.colors.text,
-            font=TypeTokens.ROW,
-            width=18,
-            anchor="w",
-        ).grid(row=0, column=0, rowspan=2, sticky="nw", pady=(10, 0))
-        entry = ttk.Entry(
-            row,
-            textvariable=variable,
-            style="Field.TEntry",
-            takefocus=True,
-        )
-        entry.grid(row=0, column=1, sticky="ew", pady=(6, 2))
-        status = tk.Label(
-            row,
-            text="",
-            bg=self.colors.content,
-            fg=self.colors.secondary,
-            font=TypeTokens.SECONDARY,
-            width=13,
-            anchor="w",
-        )
-        status.grid(row=0, column=2, padx=(10, 4), pady=(7, 0))
-        if command is not None:
-            button_label = {
-                "file": "Chọn file",
-                "folder": "Chọn thư mục",
-                "output": "Chọn vị trí lưu",
-            }[kind]
-            ttk.Button(
-                row,
-                text=button_label,
-                command=command,
-                style="TButton",
-                takefocus=True,
-            ).grid(row=0, column=3, padx=(4, 0), pady=(5, 0))
-        helper_label = tk.Label(
-            row,
-            text=helper,
-            bg=self.colors.content,
-            fg=self.colors.secondary,
-            font=TypeTokens.SECONDARY,
-            anchor="w",
-        )
-        helper_label.grid(row=1, column=1, columnspan=3, sticky="ew", pady=(0, 5))
-        tk.Frame(row, bg=self.colors.separator, height=1).place(
-            relx=0, rely=1, relwidth=1, anchor="sw"
-        )
-        view = FieldView(key, variable, entry, helper_label, status, helper, kind)
-        self.field_views[key] = view
-        if kind != "text":
-            Tooltip(entry, variable.get, self.colors)
-            entry.bind(
-                "<Button-2>",
-                lambda event, item=variable: self._show_path_menu(event, item),
+        self.status.setText(status)
+        self.primary.setText(primary)
+        self.primary.setEnabled(enabled and not busy)
+        self.secondary.setText(secondary)
+        self.secondary.setVisible(bool(secondary))
+        self.secondary.setDisabled(busy)
+        self.progress.setVisible(busy)
+
+
+class WorkerSignals(QObject):
+    succeeded = Signal(int, object)
+    failed = Signal(int, str)
+
+
+class Worker(QRunnable):
+    def __init__(self, job_id: int, function: Callable[[], object]) -> None:
+        super().__init__()
+        self.job_id = job_id
+        self.function = function
+        self.signals = WorkerSignals()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            result = self.function()
+        except Exception as exc:
+            traceback.print_exc()
+            self.signals.failed.emit(
+                self.job_id, str(exc) or exc.__class__.__name__
             )
-            entry.bind(
-                "<Control-Button-1>",
-                lambda event, item=variable: self._show_path_menu(event, item),
-            )
+        else:
+            self.signals.succeeded.emit(self.job_id, result)
+
+
+class XmlGeneratorApp(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("XML Cut Room")
+        self.resize(1280, 820)
+        self.setMinimumSize(1024, 700)
+        icon_path = bundled_asset("xmlcutroom-logo.png")
+        if icon_path:
+            self.setWindowIcon(QIcon(str(icon_path)))
+
+        self.stage = Stage.WELCOME
+        self.busy_kind: str | None = None
+        self.close_when_idle = False
+        self.job_counter = 0
+        self.active_job_id = 0
+        self.thread_pool = QThreadPool(self)
+        self.thread_pool.setMaxThreadCount(2)
+        self.workers: dict[int, Worker] = {}
+
+        self.project_path: Path | None = None
+        self.content_path: Path | None = None
+        self.video_path: Path | None = None
+        self.audio_path: Path | None = None
+        self.output_path: Path | None = None
+        self.sequence_name = ""
+        self.discovery_errors: dict[str, str] = {}
+        self.video_count = 0
+        self.voiceover_count = 0
+        self.verified_signature: tuple[str, str, str] | None = None
+        self.review_components: list[ArticleComponent] = []
+        self.review_content: Path | None = None
+        self.last_summary: SimpleGenerationSummary | None = None
+        self.last_error = ""
+
+        self._build_ui()
+        self._bind_shortcuts()
+        self._refresh_ui()
+        self._start_default_project_lookup()
+
+    def _build_ui(self) -> None:
+        surface = GradientSurface()
+        surface.setStyleSheet(APP_STYLE)
+        self.setCentralWidget(surface)
+        shell = QHBoxLayout(surface)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+        self.sidebar = Sidebar()
+        self.sidebar.changeProjectRequested.connect(self._browse_project)
+        self.sidebar.logRequested.connect(self._toggle_log)
+        shell.addWidget(self.sidebar)
+
+        workspace = QWidget()
+        workspace_layout = QVBoxLayout(workspace)
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        workspace_layout.setSpacing(0)
+        shell.addWidget(workspace, 1)
+
+        toolbar = QWidget()
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(24, 12, 24, 4)
+        toolbar_layout.addStretch(1)
+        self.log_button = QPushButton("Nhật ký")
+        self.log_button.setIcon(make_icon("log", THEME.secondary, 18))
+        self.log_button.clicked.connect(self._toggle_log)
+        toolbar_layout.addWidget(self.log_button)
+        workspace_layout.addWidget(toolbar)
+
+        self.pages = QStackedWidget()
+        self.welcome_page = WelcomePage()
+        self.welcome_page.chooseRequested.connect(self._browse_project)
+        self.setup_page = SetupPage()
+        for card in self.setup_page.source_cards.values():
+            card.chooseRequested.connect(self._browse_source)
+            card.copyRequested.connect(self._copy_text)
+            card.openRequested.connect(self._reveal_path)
+        export = self.setup_page.export
+        export.sequenceChanged.connect(self._set_sequence_name)
+        export.chooseOutputRequested.connect(self._browse_output)
+        export.copyOutputRequested.connect(self._copy_text)
+        export.openOutputRequested.connect(self._reveal_path)
+        self.review_page = ReviewPage()
+        self.review_page.selectAllChanged.connect(
+            self.review_page.structure.setAllValid
+        )
+        self.review_page.structure.selectionChanged.connect(
+            self._review_selection_changed
+        )
+        self.review_page.structure.openDocumentRequested.connect(
+            self._open_review_document
+        )
+        self.review_page.structure.copyDocumentRequested.connect(
+            self._copy_review_document
+        )
+        self.result_page = ResultPage()
+        self.result_page.openRequested.connect(self._open_result)
+        self.result_page.copyRequested.connect(self._copy_result)
+        self.result_page.backRequested.connect(self._return_to_ready)
+        for page in (
+            self.welcome_page,
+            self.setup_page,
+            self.review_page,
+            self.result_page,
+        ):
+            self.pages.addWidget(page)
+        workspace_layout.addWidget(self.pages, 1)
+
+        self.log_panel = LogPanel()
+        self.log_panel.setContentsMargins(20, 0, 20, 12)
+        self.log_panel.hide()
+        workspace_layout.addWidget(self.log_panel)
+        self.action_bar = ActionBar()
+        self.action_bar.primaryRequested.connect(self._primary_action)
+        self.action_bar.secondaryRequested.connect(self._secondary_action)
+        workspace_layout.addWidget(self.action_bar)
 
     def _bind_shortcuts(self) -> None:
-        modifier = "Command" if IS_MACOS else "Control"
-        self.root.bind_all(f"<{modifier}-o>", self._shortcut_open)
-        self.root.bind_all(f"<{modifier}-O>", self._shortcut_open)
-        self.root.bind_all(f"<{modifier}-l>", self._shortcut_log)
-        self.root.bind_all(f"<{modifier}-L>", self._shortcut_log)
-        self.root.bind_all(f"<{modifier}-Return>", self._shortcut_confirm)
-        self.root.bind_all("<Escape>", self._escape)
-
-    def _shortcut_open(self, _event: tk.Event) -> str:
-        self._browse_project()
-        return "break"
-
-    def _shortcut_log(self, _event: tk.Event) -> str:
-        self._toggle_log()
-        return "break"
-
-    def _shortcut_confirm(self, _event: tk.Event) -> str:
-        if self.current_page == "review":
-            if str(self.confirm_button.cget("state")) != "disabled":
-                self._confirm_review()
-        elif self.verified_content is not None:
-            if str(self.generate_button.cget("state")) != "disabled":
-                self._generate()
-        elif str(self.review_button.cget("state")) != "disabled":
-            self._review_content()
-        return "break"
-
-    def _escape(self, _event: tk.Event) -> str | None:
-        if self._toast is not None:
-            self._dismiss_toast()
-            return "break"
-        if self.structure_list is not None and self.structure_list.collapse_all():
-            return "break"
-        return None
-
-    def _inputs_changed(self, *_args: object) -> None:
-        if self._suspend_trace:
-            return
-        if self.verified_content is not None:
-            try:
-                current = Path(self.content_var.get()).expanduser().resolve()
-            except OSError:
-                current = None
-            if normalized_path(current) != normalized_path(self.verified_content):
-                self.verified_content = None
-                self.status_var.set("Content đã thay đổi, cần kiểm tra lại")
-                self.generation_success = False
-        self._update_generate_state()
-
-    def _set_paths(self, values: list[tuple[tk.StringVar, Path | str]]) -> None:
-        self._suspend_trace = True
-        try:
-            for variable, value in values:
-                variable.set(path_text(value))
-        finally:
-            self._suspend_trace = False
-        self._update_generate_state()
-
-    def _load_initial_project(self) -> None:
-        try:
-            project_dir = resolve_default_project()
-        except GeneratorError:
-            self._update_generate_state()
-            return
-        self._autofill_project(project_dir, review=False)
-
-    def _autofill_project(self, project_dir: Path, *, review: bool) -> None:
-        try:
-            content = find_named_child(project_dir, DEFAULT_CONTENT_NAME)
-            if content is None:
-                docx_files = sorted(
-                    project_dir.glob("*.docx"),
-                    key=lambda path: path.name.casefold(),
-                )
-                content = docx_files[0] if docx_files else None
-            if content is None:
-                raise GeneratorError("Project phải có một file content DOCX")
-            video_dir, _videos = discover_video_media(project_dir, None)
-            audio_dir = discover_audio_directory(project_dir)
-            output = project_dir / "output_simple.xml"
-        except GeneratorError as exc:
-            self._show_error(str(exc))
-            return
-        self.verified_content = None
-        self.generation_success = False
-        self.generation_error = False
-        self._set_paths(
-            [
-                (self.project_var, project_dir),
-                (self.content_var, content),
-                (self.video_var, video_dir),
-                (self.audio_var, audio_dir),
-                (self.output_var, output),
-                (self.sequence_var, f"{project_dir.name} - Simple Cut"),
-            ]
+        open_action = QAction(self)
+        open_action.setShortcut(QKeySequence.StandardKey.Open)
+        open_action.triggered.connect(self._browse_project)
+        self.addAction(open_action)
+        log_action = QAction(self)
+        log_action.setShortcut(
+            QKeySequence("Meta+L" if IS_MACOS else "Ctrl+L")
         )
-        self.status_var.set("Đã nạp project, cần kiểm tra cấu trúc")
-        self._log(f"Đã nạp project: {project_dir}", "success")
-        if review:
-            self.root.after(80, self._review_content)
+        log_action.triggered.connect(self._toggle_log)
+        self.addAction(log_action)
+        primary_action = QAction(self)
+        primary_action.setShortcut(
+            QKeySequence("Meta+Return" if IS_MACOS else "Ctrl+Return")
+        )
+        primary_action.triggered.connect(self._primary_action)
+        self.addAction(primary_action)
+        escape_action = QAction(self)
+        escape_action.setShortcut(QKeySequence(Qt.Key.Key_Escape))
+        escape_action.triggered.connect(self._escape)
+        self.addAction(escape_action)
+
+    def _next_job_id(self) -> int:
+        self.job_counter += 1
+        self.active_job_id = self.job_counter
+        return self.job_counter
+
+    def _run_worker(
+        self,
+        kind: str,
+        function: Callable[[], object],
+        success: Callable[[object], None],
+    ) -> None:
+        if self.busy_kind:
+            return
+        job_id = self._next_job_id()
+        self.busy_kind = kind
+        worker = Worker(job_id, function)
+
+        def succeeded(returned_id: int, result: object) -> None:
+            if returned_id != self.active_job_id:
+                self.workers.pop(returned_id, None)
+                return
+            self.workers.pop(returned_id, None)
+            self.busy_kind = None
+            success(result)
+            self._finish_worker()
+
+        def failed(returned_id: int, message: str) -> None:
+            if returned_id != self.active_job_id:
+                self.workers.pop(returned_id, None)
+                return
+            self.workers.pop(returned_id, None)
+            self.busy_kind = None
+            self._worker_failed(kind, message)
+            self._finish_worker()
+
+        worker.signals.succeeded.connect(succeeded)
+        worker.signals.failed.connect(failed)
+        self.workers[job_id] = worker
+        self.thread_pool.start(worker)
+        self._refresh_ui()
+
+    def _finish_worker(self) -> None:
+        if self.close_when_idle:
+            QApplication.quit()
+            return
+        self._refresh_ui()
+
+    def _worker_failed(self, kind: str, message: str) -> None:
+        self.last_error = message
+        self._log(f"LỖI: {message}", "error")
+        if kind == "default_project":
+            self.welcome_page.setNotice(
+                "Chưa tìm thấy project mặc định. Hãy chọn thủ công."
+            )
+            return
+        if kind == "project":
+            self.stage = Stage.WELCOME
+            self.welcome_page.setNotice(message, error=True)
+        elif kind == "review":
+            self.stage = Stage.SETUP
+            self.setup_page.showNotice(message)
+            self._show_error_dialog("Không thể kiểm tra cấu trúc", message)
+        elif kind == "generation":
+            self.stage = Stage.READY
+            self.setup_page.showNotice(f"Xuất XML thất bại: {message}")
+            self._show_error_dialog("Không thể xuất XML", message)
+
+    def _start_default_project_lookup(self) -> None:
+        def lookup() -> object:
+            return discover_project_sources(resolve_default_project())
+
+        self._run_worker("default_project", lookup, self._project_discovered)
 
     def _browse_project(self) -> None:
-        selected = filedialog.askdirectory(
-            title="Chọn thư mục project",
-            initialdir=self.project_var.get() or str(Path.cwd()),
+        if self.busy_kind:
+            return
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Chọn thư mục project",
+            str(self.project_path or Path.cwd()),
         )
         if selected:
-            self._autofill_project(Path(selected).resolve(), review=True)
+            self._start_project_discovery(Path(selected))
 
-    def _browse_content(self) -> None:
-        selected = filedialog.askopenfilename(
-            title="Chọn content.docx",
-            initialdir=self.project_var.get() or str(Path.cwd()),
-            filetypes=(("Word document", "*.docx"), ("All files", "*.*")),
+    def _start_project_discovery(self, project: Path) -> None:
+        self._invalidate_review()
+        self.last_error = ""
+        self._log(f"Đang quét project: {project}")
+        self._run_worker(
+            "project",
+            lambda: discover_project_sources(project),
+            self._project_discovered,
         )
-        if selected:
-            content = Path(selected).resolve()
-            self._set_paths(
-                [
-                    (self.project_var, content.parent),
-                    (self.content_var, content),
-                    (self.output_var, content.parent / "output_simple.xml"),
-                    (self.sequence_var, f"{content.parent.name} - Simple Cut"),
-                ]
+
+    def _project_discovered(self, payload: object) -> None:
+        result = payload if isinstance(payload, dict) else {}
+        self.project_path = (
+            result.get("project")
+            if isinstance(result.get("project"), Path)
+            else None
+        )
+        self.content_path = (
+            result.get("content")
+            if isinstance(result.get("content"), Path)
+            else None
+        )
+        self.video_path = (
+            result.get("video")
+            if isinstance(result.get("video"), Path)
+            else None
+        )
+        self.audio_path = (
+            result.get("audio")
+            if isinstance(result.get("audio"), Path)
+            else None
+        )
+        self.video_count = int(result.get("video_count", 0))
+        self.voiceover_count = int(result.get("voiceover_count", 0))
+        errors = result.get("errors", {})
+        self.discovery_errors = dict(errors) if isinstance(errors, dict) else {}
+        if self.project_path:
+            self.output_path = self.project_path / "output_simple.xml"
+            self.sequence_name = f"{self.project_path.name} - Simple Cut"
+            self.stage = Stage.SETUP
+            self.setup_page.showNotice("")
+            self.welcome_page.setNotice("")
+            self._log(f"Đã nạp project: {self.project_path}", "success")
+
+    def _browse_source(self, key: str) -> None:
+        if self.busy_kind:
+            return
+        initial = str(self.project_path or Path.cwd())
+        selected = ""
+        if key == "content":
+            selected, _ = QFileDialog.getOpenFileName(
+                self,
+                "Chọn content DOCX",
+                initial,
+                "Word document (*.docx);;Tất cả file (*)",
             )
-            self.root.after(50, self._review_content)
+        else:
+            title = (
+                "Chọn thư mục video"
+                if key == "video"
+                else "Chọn thư mục voice-over"
+            )
+            selected = QFileDialog.getExistingDirectory(self, title, initial)
+        if not selected:
+            return
+        path = Path(selected).resolve()
+        self._invalidate_review()
+        self.discovery_errors.pop(key, None)
+        if key == "content":
+            self.content_path = path
+        elif key == "video":
+            self.video_path = path
+            self.video_count = 0
+        else:
+            self.audio_path = path
+            self.voiceover_count = audio_file_count(path)
+        self.last_error = ""
+        self.setup_page.showNotice("")
+        self._refresh_ui()
 
-    def _browse_video(self) -> None:
-        selected = filedialog.askdirectory(
-            title="Chọn thư mục video",
-            initialdir=self.video_var.get() or self.project_var.get() or str(Path.cwd()),
+    def _browse_output(self) -> None:
+        if self.busy_kind:
+            return
+        fallback = (
+            self.project_path / "output_simple.xml"
+            if self.project_path
+            else Path.cwd() / "output_simple.xml"
+        )
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Chọn XML đầu ra",
+            str(self.output_path or fallback),
+            "Premiere XML (*.xml);;Tất cả file (*)",
         )
         if selected:
-            self.video_var.set(path_text(selected))
+            path = Path(selected).resolve()
+            self.output_path = (
+                path if path.suffix.casefold() == ".xml" else path.with_suffix(".xml")
+            )
+            self._refresh_ui()
 
-    def _browse_audio(self) -> None:
-        selected = filedialog.askdirectory(
-            title="Chọn thư mục voice-over",
-            initialdir=self.audio_var.get() or self.project_var.get() or str(Path.cwd()),
+    def _set_sequence_name(self, value: str) -> None:
+        self.sequence_name = value
+        self._refresh_action_bar()
+
+    def _input_signature(self) -> tuple[str, str, str] | None:
+        if not (self.content_path and self.video_path and self.audio_path):
+            return None
+        return (
+            normalized_path(self.content_path),
+            normalized_path(self.video_path),
+            normalized_path(self.audio_path),
         )
-        if selected:
-            self.audio_var.set(path_text(selected))
 
-    def _validate_fields(self) -> dict[str, tuple[str, str]]:
-        result: dict[str, tuple[str, str]] = {}
-        specs = {
-            "content": (self.content_var, "file", ".docx", "Content DOCX"),
-            "video": (self.video_var, "directory", "", "Thư mục video"),
-            "audio": (self.audio_var, "directory", "", "Thư mục voice-over"),
+    def _invalidate_review(self) -> None:
+        self._next_job_id()
+        self.verified_signature = None
+        self.review_components = []
+        self.review_content = None
+        self.last_summary = None
+        if self.project_path:
+            self.stage = Stage.SETUP
+
+    def _field_states(self) -> dict[str, tuple[str, str]]:
+        states: dict[str, tuple[str, str]] = {}
+        specifications = {
+            "content": (self.content_path, "file", ".docx"),
+            "video": (self.video_path, "directory", ""),
+            "audio": (self.audio_path, "directory", ""),
         }
-        for key, (variable, kind, suffix, label) in specs.items():
-            raw = variable.get().strip()
-            if not raw:
-                result[key] = ("empty", f"Chưa chọn {label.lower()}.")
-                continue
-            path = Path(raw).expanduser()
-            if suffix and path.suffix.casefold() != suffix:
-                result[key] = ("error", f"{label} phải có đuôi {suffix}.")
+        for key, (path, kind, suffix) in specifications.items():
+            if path is None:
+                error = self.discovery_errors.get(key, "")
+                states[key] = ("error" if error else "warning", error)
+            elif suffix and path.suffix.casefold() != suffix:
+                states[key] = ("error", f"File phải có đuôi {suffix}")
             elif kind == "file" and not path.is_file():
-                result[key] = ("error", f"Không tìm thấy file: {path}")
+                states[key] = ("error", f"Không tìm thấy file: {path}")
             elif kind == "directory" and not path.is_dir():
-                result[key] = ("error", f"Không tìm thấy thư mục: {path}")
+                states[key] = ("error", f"Không tìm thấy thư mục: {path}")
             else:
-                result[key] = ("valid", "Đã tìm thấy.")
-        return result
+                states[key] = ("ready", "")
+        return states
 
-    def _update_field_states(self) -> None:
-        for key, (state, message) in self._validate_fields().items():
-            view = self.field_views.get(key)
-            if view is None:
-                continue
-            if state == "valid":
-                color, status, style = self.colors.success, "✓ Đã tìm thấy", "Valid.Field.TEntry"
-            elif state == "error":
-                color, status, style = self.colors.error, "! Có lỗi", "Error.Field.TEntry"
-            else:
-                color, status, style = self.colors.secondary, "Chưa chọn", "Field.TEntry"
-            if key == "output" and state == "valid":
-                status = "✓ Hợp lệ"
-            view.entry.configure(style=style)
-            view.status_label.configure(text=status, fg=color)
-            view.helper_label.configure(
-                text=(view.default_helper + " " + message) if state == "valid" else message,
-                fg=self.colors.error if state == "error" else self.colors.secondary,
-            )
-
-    def _all_fields_valid(self) -> bool:
-        return all(state == "valid" for state, _ in self._validate_fields().values())
-
-    def _project_valid(self) -> bool:
-        raw = self.project_var.get().strip()
-        return bool(raw and Path(raw).expanduser().is_dir())
-
-    def _required_paths_ready(self) -> bool:
-        return all(
-            variable.get().strip()
-            for variable in (
-                self.project_var,
-                self.content_var,
-                self.video_var,
-                self.audio_var,
-            )
+    def _all_sources_ready(self) -> bool:
+        return bool(self.project_path and self.project_path.is_dir()) and all(
+            state == "ready" for state, _ in self._field_states().values()
         )
 
-    def _blocked_reason(self) -> str:
-        if self.is_running:
-            return "XML đang được tạo. Vui lòng chờ hoàn tất."
-        if self.is_review_loading:
-            return "Đang kiểm tra cấu trúc content.docx."
-        if not self._project_valid():
-            return (
-                "Không tìm thấy thư mục project đã chọn."
-                if self.project_var.get().strip()
-                else "Chọn project để bắt đầu."
-            )
-        invalid = [
-            message
-            for state, message in self._validate_fields().values()
-            if state != "valid"
-        ]
-        if invalid:
-            return invalid[0]
-        if self.verified_content is None:
-            return "Cần xác nhận đủ 8 thành phần trước khi tạo XML."
-        return "Sẵn sàng tạo XML."
-
-    def _workflow_states(self) -> list[str]:
-        project_raw = self.project_var.get().strip()
-        project_valid = bool(project_raw and Path(project_raw).expanduser().is_dir())
-        fields = self._validate_fields()
-        data_valid = project_valid and all(
-            state == "valid" for state, _ in fields.values()
+    def _output_ready(self) -> bool:
+        return bool(
+            self.output_path
+            and self.output_path.parent.is_dir()
+            and self.sequence_name.strip()
         )
-        project_state = "complete" if project_valid else "error" if project_raw else "current"
-        if not project_valid:
-            return [project_state, "pending", "pending", "pending"]
-        data_state = (
-            "complete"
-            if data_valid
-            else "error"
-            if any(state == "error" for state, _ in fields.values())
-            else "current"
-        )
-        if not data_valid:
-            return ["complete", data_state, "pending", "pending"]
-        if self.current_page != "review" and self.verified_content is None:
-            return ["complete", "current", "pending", "pending"]
-        review_state = "current" if self.current_page == "review" else "complete"
-        if self.generation_success:
-            export_state = "complete"
-        elif self.generation_error:
-            export_state = "error"
-        elif self.is_running or self.verified_content is not None:
-            export_state = "current"
-        else:
-            export_state = "pending"
-        return ["complete", "complete", review_state, export_state]
 
-    def _update_workflow_ui(self) -> None:
-        states = self._workflow_states()
-        self.sidebar.update_states(states)
-        if self.generation_success:
-            color = self.colors.success
-        elif self.generation_error:
-            color = self.colors.error
-        elif self.verified_content is not None:
-            color = self.colors.success
-        elif self.project_var.get().strip():
-            color = self.colors.secondary
-        else:
-            color = self.colors.tertiary
-        self.sidebar.project_status.configure(fg=color)
-
-    def _update_generate_state(self) -> None:
-        self._update_field_states()
-        enabled = (
-            not self.is_running
-            and not self.is_review_loading
-            and self.verified_content is not None
-            and self._required_paths_ready()
-            and self._all_fields_valid()
-            and self._project_valid()
-        )
-        self.generate_button.configure(state="normal" if enabled else "disabled")
-        content_valid = self._validate_fields().get("content", ("empty", ""))[0] == "valid"
-        self.review_button.configure(
-            state=(
-                "normal"
-                if content_valid and not self.is_running and not self.is_review_loading
-                else "disabled"
-            )
-        )
-        self.action_status_var.set(self._blocked_reason())
-        project_raw = self.project_var.get().strip()
-        self.project_name_var.set(Path(project_raw).name if project_raw else "Chưa có project")
-        if self.generation_success:
-            badge = "Đã xuất XML"
-        elif self.verified_content is not None:
-            badge = "Sẵn sàng"
-        elif self._all_fields_valid():
-            badge = "Chờ xác nhận"
-        elif project_raw:
-            badge = "Thiếu dữ liệu"
-        else:
-            badge = "Chưa sẵn sàng"
-        self.project_badge_var.set(badge)
-        self._update_workflow_ui()
-        self.toolbar.set_can_go_back(self.current_page == "review")
-
-    def _review_content(self) -> None:
-        if self.is_review_loading or self.is_running:
+    def _start_review(self) -> None:
+        if not self._all_sources_ready() or not self.content_path or not self.audio_path:
             return
-        raw_path = self.content_var.get().strip()
-        if not raw_path:
-            self._show_error("Hãy chọn content.docx trước")
+        content_snapshot = self.content_path
+        audio_snapshot = self.audio_path
+        signature = self._input_signature()
+        self._log(f"Đang kiểm tra cấu trúc: {content_snapshot}")
+
+        def review() -> object:
+            return {
+                "signature": signature,
+                "content": content_snapshot,
+                "components": inspect_docx_components(content_snapshot),
+                "voiceovers": audio_file_count(audio_snapshot),
+            }
+
+        self._run_worker("review", review, self._review_loaded)
+
+    def _review_loaded(self, payload: object) -> None:
+        result = payload if isinstance(payload, dict) else {}
+        if result.get("signature") != self._input_signature():
+            self._log("Đã bỏ qua kết quả review thuộc nguồn cũ.", "warning")
             return
-        content_path = Path(raw_path).expanduser().resolve()
-        if not content_path.is_file():
-            self._show_error(f"Không tìm thấy content.docx: {content_path}")
-            return
-        self.is_review_loading = True
-        self.verified_content = None
-        self.status_var.set("Đang đọc cấu trúc content.docx")
-        self.review_button.configure(text="Đang kiểm tra...", state="disabled")
-        self._set_processing(True)
-        self._log(f"Đang kiểm tra cấu trúc: {content_path}")
-        audio_path = Path(self.audio_var.get()).expanduser()
-        self.root.after(40, self._poll_worker_results)
-
-        def worker() -> None:
-            try:
-                components = inspect_docx_components(content_path)
-                voiceovers = audio_file_count(audio_path)
-            except Exception as exc:
-                self._worker_results.put(("review_error", exc))
-                return
-            self._worker_results.put(("review_ok", (content_path, components, voiceovers)))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _review_loaded(
-        self,
-        content_path: Path,
-        components: list[ArticleComponent],
-        voiceovers: int,
-    ) -> None:
-        self.is_review_loading = False
-        self.review_button.configure(text="Kiểm tra cấu trúc")
-        self._set_processing(False)
-        self.review_path = content_path
-        self.review_components = components
-        self.current_page = "review"
-        self.status_var.set("Đang kiểm tra 8 thành phần")
-        self._show_review_page(content_path, components, voiceovers)
-        self._update_generate_state()
-
-    def _review_failed(self, error: Exception) -> None:
-        self.is_review_loading = False
-        self.review_button.configure(text="Kiểm tra cấu trúc")
-        self._set_processing(False)
-        self._show_error(str(error))
-
-    def _show_review_page(
-        self,
-        content_path: Path,
-        components: list[ArticleComponent],
-        voiceovers: int,
-    ) -> None:
-        self.setup_page.grid_remove()
-        if self.review_page is not None:
-            self.review_page.destroy()
-        page = tk.Frame(self.view_host, bg=self.colors.content)
-        self.review_page = page
-        page.grid(row=0, column=0, sticky="nsew")
-        page.grid_columnconfigure(0, weight=1)
-        page.grid_rowconfigure(3, weight=1)
-
-        header = tk.Frame(page, bg=self.colors.content)
-        header.grid(
-            row=0,
-            column=0,
-            sticky="ew",
-            padx=LayoutTokens.CONTENT_PAD_X,
-            pady=(LayoutTokens.CONTENT_PAD_Y, 13),
+        components = result.get("components", [])
+        self.review_components = (
+            list(components) if isinstance(components, list) else []
         )
-        header.grid_columnconfigure(0, weight=1)
-        tk.Label(
-            header,
-            text="BƯỚC 3 TRÊN 4",
-            bg=self.colors.content,
-            fg=self.colors.secondary,
-            font=(TypeTokens.UI, 10, "bold"),
-            anchor="w",
-        ).grid(row=0, column=0, sticky="w")
-        tk.Label(
-            header,
-            text="Kiểm tra cấu trúc",
-            bg=self.colors.content,
-            fg=self.colors.text,
-            font=TypeTokens.TITLE,
-            anchor="w",
-        ).grid(row=1, column=0, sticky="w", pady=(4, 2))
-        tk.Label(
-            header,
-            text="Xác nhận các phần trước khi tạo timeline.",
-            bg=self.colors.content,
-            fg=self.colors.secondary,
-            font=TypeTokens.BODY,
-            anchor="w",
-        ).grid(row=2, column=0, sticky="w")
-        document_button = ttk.Button(
-            header,
-            text=f"▤  {content_path.name}",
-            command=lambda: self._show_document_menu(document_button, content_path),
-            style="TButton",
-            takefocus=True,
+        self.review_content = (
+            result.get("content")
+            if isinstance(result.get("content"), Path)
+            else None
         )
-        document_button.grid(row=1, column=1, rowspan=2, sticky="e", padx=(14, 0))
-        Tooltip(document_button, path_text(content_path), self.colors)
-        document_button.bind(
-            "<Button-2>",
-            lambda event: self._show_path_menu_value(event, content_path),
-        )
-        document_button.bind(
-            "<Control-Button-1>",
-            lambda event: self._show_path_menu_value(event, content_path),
+        self.voiceover_count = int(result.get("voiceovers", 0))
+        if self.review_content:
+            self.review_page.structure.load(
+                self.review_content, self.review_components
+            )
+        self.stage = Stage.REVIEW
+        self._log(
+            f"Đã đọc {len(self.review_components)} thành phần từ DOCX.",
+            "success",
         )
 
-        self.summary_bar = SummaryBar(page, self, components, voiceovers)
-        self.summary_bar.grid(
-            row=1,
-            column=0,
-            sticky="ew",
-            padx=LayoutTokens.CONTENT_PAD_X,
+    def _review_selection_changed(self) -> None:
+        selected, _total, _all_ready = (
+            self.review_page.structure.selectionStats()
         )
-        tk.Label(
-            page,
-            text="Thành phần bài",
-            bg=self.colors.content,
-            fg=self.colors.text,
-            font=TypeTokens.SECTION,
-            anchor="w",
-        ).grid(
-            row=2,
-            column=0,
-            sticky="ew",
-            padx=LayoutTokens.CONTENT_PAD_X,
-            pady=(14, 7),
+        self.review_page.updateSummary(
+            self.review_components, self.voiceover_count, selected
         )
-        self.review_variables = [tk.BooleanVar(value=False) for _ in components]
-        self.structure_list = StructureList(page, self, components)
-        self.structure_list.grid(
-            row=3,
-            column=0,
-            sticky="nsew",
-            padx=LayoutTokens.CONTENT_PAD_X,
-            pady=(0, 12),
-        )
-        self.action_bar.show_review()
-        self._update_confirm_state()
-
-    def _show_document_menu(self, widget: tk.Widget, path: Path) -> None:
-        menu = self._path_menu(path_text(path))
-        menu.tk_popup(widget.winfo_rootx(), widget.winfo_rooty() + widget.winfo_height())
-
-    def _select_all(self) -> None:
-        desired = True
-        if self.summary_bar is not None:
-            desired = self.summary_bar.select_all_var.get()
-        if not desired and not any(variable.get() for variable in self.review_variables):
-            desired = True
-        for component, variable in zip(
-            self.review_components, self.review_variables, strict=True
-        ):
-            variable.set(desired and component_is_ready(component))
-        if self.structure_list is not None:
-            self.structure_list.refresh_all()
-        self._update_confirm_state()
-
-    def _update_confirm_state(self) -> None:
-        total = len(self.review_variables)
-        selected = sum(variable.get() for variable in self.review_variables)
-        self.review_footer_var.set(f"Đã chọn {selected} trong {total} thành phần")
-        if self.summary_bar is not None:
-            self.summary_bar.set_selected(selected, total)
-        ready = bool(self.review_components) and all(
-            component_is_ready(item) for item in self.review_components
-        )
-        checked = bool(self.review_variables) and all(
-            variable.get() for variable in self.review_variables
-        )
-        self.confirm_button.configure(state="normal" if ready and checked else "disabled")
-        if self.current_page == "review":
-            self.action_status_var.set(self.review_footer_var.get())
+        self._refresh_action_bar()
 
     def _confirm_review(self) -> None:
-        if self.review_path is None:
+        selected, total, all_ready = self.review_page.structure.selectionStats()
+        if not total or not all_ready or selected != total:
+            self._show_error_dialog(
+                "Chưa thể xác nhận",
+                "Hãy chọn đủ tất cả thành phần hợp lệ trước khi tiếp tục.",
+            )
             return
-        if not self.review_variables or not all(
-            variable.get() for variable in self.review_variables
-        ):
-            self._show_error("Cần xác nhận đủ 8 thành phần trước khi tiếp tục")
-            return
-        self.verified_content = self.review_path
-        cut_count = sum(
-            item.video_cut_count
-            for item in self.review_components
-            if item.key != "outro"
-        )
-        self.status_var.set("Cấu trúc đã xác nhận, sẵn sàng tạo XML")
-        self._log(
-            f"Đã xác nhận {len(self.review_components)} thành phần, {cut_count} video cut",
-            "success",
-        )
-        self._return_to_setup()
+        self.verified_signature = self._input_signature()
+        self.stage = Stage.READY
+        self._log(f"Đã xác nhận {total} thành phần.", "success")
+        self.setup_page.showNotice("")
+        self._refresh_ui()
 
     def _cancel_review(self) -> None:
-        if self.current_page != "review":
-            return
-        self.verified_content = None
-        self.status_var.set("Cấu trúc chưa được xác nhận")
-        self._log("Đã quay lại mà chưa xác nhận cấu trúc.", "warning")
-        self._return_to_setup()
+        self.verified_signature = None
+        self.stage = Stage.SETUP
+        self._log(
+            "Đã quay lại chỉnh nguồn; cấu trúc chưa được xác nhận.", "warning"
+        )
+        self._refresh_ui()
 
-    def _return_to_setup(self) -> None:
-        self.current_page = "setup"
-        if self.review_page is not None:
-            self.review_page.grid_remove()
-        self.setup_page.grid()
-        self.action_bar.show_setup()
-        self.structure_list = None
-        self.summary_bar = None
-        self._update_generate_state()
-
-    def _generate(self) -> None:
-        if self.is_running:
+    def _start_generation(self) -> None:
+        if (
+            self.verified_signature != self._input_signature()
+            or not self._all_sources_ready()
+            or not self._output_ready()
+        ):
             return
-        if self.verified_content is None:
-            self._show_error("Hãy kiểm tra và xác nhận content.docx trước")
-            return
-        if not self._all_fields_valid():
-            self._show_error(self._blocked_reason())
-            return
+        assert self.project_path
+        assert self.content_path
+        assert self.video_path
+        assert self.audio_path
+        assert self.output_path
         snapshot = {
-            "project_dir": Path(self.project_var.get()).expanduser().resolve(),
-            "content": Path(self.content_var.get()).expanduser().resolve(),
-            "video_dir": Path(self.video_var.get()).expanduser().resolve(),
-            "audio_dir": Path(self.audio_var.get()).expanduser().resolve(),
-            "output": Path(self.output_var.get()).expanduser().resolve(),
-            "sequence_name": self.sequence_var.get().strip() or None,
+            "project_dir": self.project_path.resolve(),
+            "content": self.content_path.resolve(),
+            "video_dir": self.video_path.resolve(),
+            "audio_dir": self.audio_path.resolve(),
+            "output": self.output_path.resolve(),
+            "sequence_name": self.sequence_name.strip(),
         }
-        self.is_running = True
-        self.generation_error = False
-        self.generation_success = False
-        self.status_var.set("Đang kiểm tra media và tạo XML")
-        self.generate_button.configure(text="Đang tạo...", state="disabled")
-        self._set_processing(True)
-        self._log("Bắt đầu kiểm tra 6 video và 103 voice-over...")
-        self._update_generate_state()
-        self.root.after(40, self._poll_worker_results)
+        signature = self._input_signature()
+        self.last_error = ""
+        self.setup_page.showNotice("")
+        self._log("Bắt đầu kiểm tra media và tạo XML...")
 
-        def worker() -> None:
-            try:
-                summary = generate_simple_project_xml(**snapshot)
-            except Exception as exc:
-                self._worker_results.put(("generation_error", exc))
-                return
-            self._worker_results.put(("generation_ok", summary))
+        def generate() -> object:
+            return {
+                "signature": signature,
+                "summary": generate_simple_project_xml(**snapshot),
+            }
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._run_worker("generation", generate, self._generation_succeeded)
 
-    def _poll_worker_results(self) -> None:
-        handled = False
-        while True:
-            try:
-                kind, payload = self._worker_results.get_nowait()
-            except queue.Empty:
-                break
-            handled = True
-            if kind == "review_ok":
-                content_path, components, voiceovers = payload  # type: ignore[misc]
-                self._review_loaded(content_path, components, voiceovers)
-            elif kind == "review_error":
-                self._review_failed(payload)  # type: ignore[arg-type]
-            elif kind == "generation_ok":
-                self._generation_succeeded(payload)  # type: ignore[arg-type]
-            elif kind == "generation_error":
-                self._generation_failed(payload)  # type: ignore[arg-type]
-        if not handled and (self.is_running or self.is_review_loading):
-            self.root.after(40, self._poll_worker_results)
-
-    def _generation_succeeded(self, summary: SimpleGenerationSummary) -> None:
-        self.is_running = False
-        self.generation_success = True
-        self.generation_error = False
-        self.generate_button.configure(text="Tạo XML")
-        self._set_processing(False)
-        self.status_var.set("XML đã tạo và kiểm tra thành công")
+    def _generation_succeeded(self, payload: object) -> None:
+        result = payload if isinstance(payload, dict) else {}
+        if result.get("signature") != self._input_signature():
+            self._log("Đã bỏ qua kết quả export thuộc nguồn cũ.", "warning")
+            return
+        summary = result.get("summary")
+        if not isinstance(summary, SimpleGenerationSummary):
+            self._worker_failed(
+                "generation", "Backend không trả về kết quả hợp lệ"
+            )
+            return
+        self.last_summary = summary
+        self.stage = Stage.SUCCESS
+        self.result_page.setSummary(summary)
         self._log(
             f"Hoàn tất: {summary.video_cut_count} video cut, "
-            f"{summary.narration_count} voice-over, {summary.duration_seconds:.2f}s",
-            "success",
-        )
-        self._log(
-            "XML sạch: không có blueprint, blur, filter, overlay hoặc transition.",
+            f"{summary.narration_count} voice-over, "
+            f"{summary.duration_seconds:.2f}s",
             "success",
         )
         self._log(f"Output: {summary.output}", "success")
-        self._show_success_toast(summary.output)
-        self._update_generate_state()
 
-    def _generation_failed(self, error: Exception) -> None:
-        self.is_running = False
-        self.generation_success = False
-        self.generation_error = True
-        self.generate_button.configure(text="Tạo XML")
-        self._set_processing(False)
-        self.status_var.set("Tạo XML thất bại")
-        self._update_generate_state()
-        self._show_error(str(error))
+    def _return_to_ready(self) -> None:
+        self.stage = (
+            Stage.READY
+            if self.verified_signature == self._input_signature()
+            else Stage.SETUP
+        )
+        self._refresh_ui()
 
-    def _set_processing(self, active: bool) -> None:
-        if active:
-            self.progress.pack(fill="x", pady=(5, 0))
-            self.progress.start(12)
-        else:
-            self.progress.stop()
-            self.progress.pack_forget()
+    def _primary_action(self) -> None:
+        if self.busy_kind:
+            return
+        if self.stage == Stage.SETUP:
+            self._start_review()
+        elif self.stage == Stage.REVIEW:
+            self._confirm_review()
+        elif self.stage == Stage.READY:
+            self._start_generation()
 
-    def _show_success_toast(self, output: Path) -> None:
-        self._dismiss_toast()
-        toast = tk.Toplevel(self.root)
-        self._toast = toast
-        toast.title("Tạo XML thành công")
-        toast.resizable(False, False)
-        toast.transient(self.root)
-        toast.configure(bg=self.colors.elevated)
-        try:
-            if sys.platform == "darwin":
-                toast.tk.call(
-                    "tk::unsupported::MacWindowStyle",
-                    "style",
-                    toast._w,
-                    "utility",
-                    "closeBox",
+    def _secondary_action(self) -> None:
+        if self.busy_kind:
+            return
+        if self.stage == Stage.REVIEW:
+            self._cancel_review()
+        elif self.stage == Stage.READY:
+            self.verified_signature = None
+            self._start_review()
+
+    def _refresh_ui(self) -> None:
+        states = self._field_states()
+        paths = {
+            "content": self.content_path,
+            "video": self.video_path,
+            "audio": self.audio_path,
+        }
+        for key, card in self.setup_page.source_cards.items():
+            state, message = states[key]
+            card.setPathState(paths[key], state, message)
+            card.setBusy(bool(self.busy_kind))
+        self.setup_page.summary.updateSummary(
+            self.project_path, states, self.video_count, self.voiceover_count
+        )
+        self.setup_page.export.setValues(self.sequence_name, self.output_path)
+        self.setup_page.export.setBusy(bool(self.busy_kind))
+
+        if self.stage == Stage.WELCOME:
+            self.pages.setCurrentWidget(self.welcome_page)
+        elif self.stage in {Stage.SETUP, Stage.READY}:
+            self.pages.setCurrentWidget(self.setup_page)
+            if self.stage == Stage.READY:
+                self.setup_page.header.setCopy(
+                    "Bước 4",
+                    "Sẵn sàng xuất XML",
+                    "Cấu trúc đã được xác nhận. Kiểm tra tên sequence và vị trí lưu.",
                 )
-        except tk.TclError:
-            pass
-        body = tk.Frame(toast, bg=self.colors.elevated, padx=18, pady=16)
-        body.pack(fill="both", expand=True)
-        tk.Label(
-            body,
-            text="✓  Tạo XML thành công",
-            bg=self.colors.elevated,
-            fg=self.colors.success,
-            font=TypeTokens.SECTION,
-            anchor="w",
-        ).pack(fill="x")
-        path_label = tk.Label(
-            body,
-            text=shorten_middle(path_text(output), 62),
-            bg=self.colors.elevated,
-            fg=self.colors.secondary,
-            font=TypeTokens.MONO_SMALL,
-            anchor="w",
-        )
-        path_label.pack(fill="x", pady=(8, 13))
-        Tooltip(path_label, path_text(output), self.colors)
-        actions = tk.Frame(body, bg=self.colors.elevated)
-        actions.pack(fill="x")
-        ttk.Button(
-            actions,
-            text=f"Mở trong {FILE_MANAGER_LABEL}",
-            command=lambda: self._open_path_value(output),
-        ).pack(side="left")
-        ttk.Button(
-            actions,
-            text="Copy đường dẫn",
-            command=lambda: self._copy_value(path_text(output)),
-        ).pack(side="left", padx=(7, 0))
-        toast.update_idletasks()
-        x = self.root.winfo_rootx() + self.root.winfo_width() - toast.winfo_reqwidth() - 24
-        y = self.root.winfo_rooty() + 54
-        toast.geometry(f"+{max(0, x)}+{max(0, y)}")
-        toast.protocol("WM_DELETE_WINDOW", self._dismiss_toast)
+            else:
+                self.setup_page.header.setCopy(
+                    "Bước 2",
+                    "Chuẩn bị dữ liệu",
+                    "Kiểm tra các nguồn trước khi tạo timeline Premiere.",
+                )
+        elif self.stage == Stage.REVIEW:
+            self.pages.setCurrentWidget(self.review_page)
+        else:
+            self.pages.setCurrentWidget(self.result_page)
 
-    def _dismiss_toast(self) -> None:
-        if self._toast is not None:
-            try:
-                self._toast.destroy()
-            except tk.TclError:
-                pass
-            self._toast = None
-
-    def _show_error(self, message: str) -> None:
-        self.status_var.set("Cần xử lý lỗi trước khi tiếp tục")
-        self._log(f"LỖI: {message}", "error")
-        self._update_generate_state()
-        messagebox.showerror(
-            "Không thể tiếp tục",
-            message + "\n\nHãy kiểm tra trường được đánh dấu hoặc chọn lại nguồn dữ liệu.",
-            parent=self.root,
+        self.sidebar.updateState(
+            self.project_path,
+            self._project_status_text(states),
+            self._step_states(states),
         )
+        self.sidebar.change_button.setDisabled(bool(self.busy_kind))
+        self.welcome_page.choose_button.setDisabled(bool(self.busy_kind))
+        self._refresh_action_bar()
+
+    def _project_status_text(
+        self, states: dict[str, tuple[str, str]]
+    ) -> str:
+        if not self.project_path:
+            return "Cần chọn project"
+        if any(state == "error" for state, _ in states.values()):
+            return "Nguồn cần xử lý"
+        if not all(state == "ready" for state, _ in states.values()):
+            return "Còn thiếu nguồn"
+        if self.stage == Stage.SUCCESS:
+            return "Đã xuất XML"
+        if self.verified_signature == self._input_signature():
+            return "Sẵn sàng xuất"
+        return "Chờ xác nhận"
+
+    def _step_states(
+        self, states: dict[str, tuple[str, str]]
+    ) -> list[str]:
+        if not self.project_path:
+            return ["current", "pending", "pending", "pending"]
+        source_error = any(state == "error" for state, _ in states.values())
+        source_ready = all(state == "ready" for state, _ in states.values())
+        result = ["complete", "pending", "pending", "pending"]
+        if not source_ready:
+            result[1] = "error" if source_error else "current"
+            return result
+        if self.stage == Stage.SETUP:
+            result[1] = "current"
+        elif self.stage == Stage.REVIEW:
+            result[1] = "complete"
+            result[2] = "current"
+        elif (
+            self.verified_signature == self._input_signature()
+            or self.stage == Stage.SUCCESS
+        ):
+            result[1] = "complete"
+            result[2] = "complete"
+            result[3] = (
+                "complete" if self.stage == Stage.SUCCESS else "current"
+            )
+        else:
+            result[2] = "current"
+        return result
+
+    def _refresh_action_bar(self) -> None:
+        busy = bool(self.busy_kind)
+        self.action_bar.setVisible(
+            self.stage not in {Stage.WELCOME, Stage.SUCCESS}
+        )
+        if self.stage == Stage.SETUP:
+            enabled = self._all_sources_ready()
+            status = (
+                self._busy_text()
+                if busy
+                else "Sẵn sàng kiểm tra cấu trúc."
+                if enabled
+                else self._blocked_reason()
+            )
+            self.action_bar.configure(
+                status, "Kiểm tra cấu trúc", enabled=enabled, busy=busy
+            )
+        elif self.stage == Stage.REVIEW:
+            selected, total, all_ready = (
+                self.review_page.structure.selectionStats()
+            )
+            enabled = bool(total and all_ready and selected == total)
+            status = (
+                self._busy_text()
+                if busy
+                else f"Đã chọn {selected}/{total} thành phần."
+                if enabled
+                else "Chọn đủ các thành phần hợp lệ để xác nhận."
+            )
+            self.action_bar.configure(
+                status,
+                "Xác nhận cấu trúc",
+                "Quay lại",
+                enabled,
+                busy,
+            )
+        elif self.stage == Stage.READY:
+            enabled = (
+                self.verified_signature == self._input_signature()
+                and self._all_sources_ready()
+                and self._output_ready()
+            )
+            status = (
+                self._busy_text()
+                if busy
+                else "Sẵn sàng tạo XML."
+                if enabled
+                else "Nhập tên sequence và chọn vị trí lưu hợp lệ."
+            )
+            self.action_bar.configure(
+                status, "Xuất XML", "Kiểm tra lại", enabled, busy
+            )
+
+    def _busy_text(self) -> str:
+        return {
+            "default_project": "Đang tìm project gần đây...",
+            "project": "Đang quét project và tìm nguồn...",
+            "review": "Đang đọc cấu trúc DOCX...",
+            "generation": "Đang kiểm tra media và tạo XML...",
+        }.get(self.busy_kind or "", "Đang xử lý...")
+
+    def _blocked_reason(self) -> str:
+        if not self.project_path:
+            return "Chọn project để bắt đầu."
+        for state, message in self._field_states().values():
+            if state == "error":
+                return message or "Có nguồn dữ liệu chưa hợp lệ."
+            if state != "ready":
+                return "Chọn đủ content, video và voice-over."
+        return "Cần kiểm tra cấu trúc DOCX."
+
+    def _toggle_log(self) -> None:
+        visible = not self.log_panel.isVisible()
+        self.log_panel.setVisible(visible)
+        self.log_button.setText("Ẩn nhật ký" if visible else "Nhật ký")
 
     def _log(self, message: str, level: str = "info") -> None:
         self.log_panel.append(message, level)
 
-    def _toggle_log(self) -> None:
-        self.log_expanded = not self.log_expanded
-        if self.log_expanded:
-            self.main_pane.add(
-                self.log_panel,
-                minsize=90,
-                height=LayoutTokens.LOG_HEIGHT,
-                stretch="never",
-            )
-            self.root.after_idle(self._place_log_sash)
-        else:
-            self.main_pane.forget(self.log_panel)
-
-    def _place_log_sash(self) -> None:
-        if not self.log_expanded:
-            return
-        try:
-            y = max(320, self.main_pane.winfo_height() - LayoutTokens.LOG_HEIGHT)
-            self.main_pane.sash_place(0, 0, y)
-        except tk.TclError:
-            pass
-
-    def _copy_value(self, value: str, *, log_event: bool = True) -> None:
-        if not value:
-            return
-        self.root.clipboard_clear()
-        self.root.clipboard_append(value)
-        self.root.update_idletasks()
-        if log_event:
+    def _copy_text(self, value: str) -> None:
+        if value:
+            QApplication.clipboard().setText(value)
             self._log("Đã copy đường dẫn vào clipboard.", "success")
 
-    def _copy_path(self, variable: tk.StringVar) -> None:
-        self._copy_value(variable.get().strip())
-
-    def _clear_path(self, variable: tk.StringVar) -> None:
-        variable.set("")
-
-    def _open_path(self, variable: tk.StringVar) -> None:
-        raw = variable.get().strip()
-        if raw:
-            self._open_path_value(Path(raw).expanduser())
-
-    def _open_path_value(self, path: Path) -> None:
+    def _reveal_path(self, raw: str) -> None:
+        if not raw:
+            return
+        path = Path(raw).expanduser()
         target = path if path.exists() else path.parent
         if not target.exists():
-            self._show_error(f"Không tìm thấy đường dẫn: {path}")
+            self._show_error_dialog("Không tìm thấy đường dẫn", str(path))
             return
         try:
-            if sys.platform == "darwin":
-                command = ["open", "-R", str(path)] if path.is_file() else ["open", str(target)]
+            if IS_MACOS:
+                command = (
+                    ["open", "-R", str(path)]
+                    if path.is_file()
+                    else ["open", str(target)]
+                )
+                subprocess.Popen(command)
             elif os.name == "nt":
-                os.startfile(str(target))  # type: ignore[attr-defined]
-                return
+                if path.is_file():
+                    subprocess.Popen(["explorer", f"/select,{path}"])
+                else:
+                    os.startfile(str(target))  # type: ignore[attr-defined]
             else:
-                command = ["xdg-open", str(target)]
-            subprocess.Popen(command)
+                subprocess.Popen(["xdg-open", str(target)])
         except OSError as exc:
-            self._show_error(f"Không thể mở {FILE_MANAGER_LABEL}: {exc}")
+            self._show_error_dialog(
+                f"Không thể mở {FILE_MANAGER}", str(exc)
+            )
 
-    def _path_menu(self, value: str) -> tk.Menu:
-        menu = tk.Menu(
-            self.root,
-            tearoff=False,
-            bg=self.colors.elevated,
-            fg=self.colors.text,
-            activebackground=self.colors.selection,
-            activeforeground="#FFFFFF",
-            font=TypeTokens.BODY,
-        )
-        menu.add_command(label="Copy Path", command=lambda: self._copy_value(value))
-        menu.add_command(
-            label=f"Mở trong {FILE_MANAGER_LABEL}",
-            command=lambda: self._open_path_value(Path(value).expanduser()),
-        )
-        return menu
+    def _open_review_document(self) -> None:
+        if self.review_content:
+            QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(self.review_content))
+            )
 
-    def _show_path_menu(self, event: tk.Event, variable: tk.StringVar) -> str:
-        return self._show_path_menu_value(event, Path(variable.get()).expanduser())
+    def _copy_review_document(self) -> None:
+        if self.review_content:
+            self._copy_text(str(self.review_content))
 
-    def _show_path_menu_value(self, event: tk.Event, path: Path) -> str:
-        value = path_text(path)
-        menu = self._path_menu(value)
-        menu.tk_popup(event.x_root, event.y_root)
-        return "break"
+    def _open_result(self) -> None:
+        if self.last_summary:
+            self._reveal_path(str(self.last_summary.output))
+
+    def _copy_result(self) -> None:
+        if self.last_summary:
+            self._copy_text(str(self.last_summary.output))
+
+    def _show_error_dialog(self, title: str, message: str) -> None:
+        QMessageBox.critical(self, title, message)
+
+    def _escape(self) -> None:
+        if self.log_panel.isVisible():
+            self._toggle_log()
+        elif self.stage == Stage.REVIEW:
+            self.review_page.structure.collapseAllDetails()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self.busy_kind and not self.close_when_idle:
+            answer = QMessageBox.question(
+                self,
+                "Đang xử lý",
+                "Tác vụ đang chạy và không thể dừng an toàn giữa chừng. "
+                "Đóng cửa sổ và thoát ngay khi tác vụ hoàn tất?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.close_when_idle = True
+                self.hide()
+            event.ignore()
+            return
+        event.accept()
 
 
-def main() -> None:
-    root = tk.Tk()
-    XmlGeneratorApp(root)
-    root.mainloop()
+def main() -> int:
+    application = QApplication(sys.argv)
+    application.setApplicationName("XML Cut Room")
+    application.setOrganizationName("XML Cut Room")
+    application.setStyle("Fusion")
+    system_font = QFontDatabase.systemFont(
+        QFontDatabase.SystemFont.GeneralFont
+    )
+    system_font.setPointSize(14)
+    application.setFont(system_font)
+    icon_path = bundled_asset("xmlcutroom-logo.png")
+    if icon_path:
+        application.setWindowIcon(QIcon(str(icon_path)))
+    window = XmlGeneratorApp()
+    window.show()
+    return application.exec()
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
