@@ -2,11 +2,16 @@
 
 Tool tạo timeline Premiere Pro từ một kịch bản Word, 6 video tình huống và các file voice-over. Các track hiệu ứng, BGM, SFX, overlay và nested sequence được giữ từ `Copied_28/28.8.xml`.
 
+Repo có hai phiên bản:
+
+- `generate_xml.py`: bản đầy đủ, giữ cấu trúc effect/template `28.8.xml`.
+- `generate_simple_xml.py`: bản tối giản, chỉ dựng video cut và audio trên V1/A1, không cần template hoặc fixed asset.
+
 ## Yêu cầu
 
 - Python 3.10 trở lên.
 - `ffmpeg`/`ffprobe` có trong `PATH`.
-- Package `python-docx`.
+- Package `python-docx` và `PySide6` (được liệt kê trong `requirements.txt`).
 
 ```bash
 python3 -m pip install -r tool/requirements.txt
@@ -74,6 +79,41 @@ python3 tool/generate_xml.py \
 
 Kết quả mặc định là `project_moi/output.xml`.
 
+## Bản tối giản: chỉ video và audio
+
+Bản này không đọc `28.8.xml` và không cần thư mục `fixed/`. Timeline được tạo mới từ đầu:
+
+- Mỗi câu voice-over được đặt nguyên file trên A1.
+- Mỗi timecode được cắt từ video tương ứng và đặt trên V1.
+- Audio gốc của đoạn video được đặt trên A1 và link với clip V1.
+- Tất cả token được nối tiếp đúng thứ tự xuất hiện trong DOCX.
+- Khoảng có voice-over nhưng không có video sẽ để hình đen mặc định.
+- Không có effect, transition, adjustment layer, graphic, overlay, BGM, SFX hoặc nested sequence.
+
+Kiểm tra trước:
+
+```bash
+python3 tool/generate_simple_xml.py \
+  --project-dir path/to/project_moi \
+  --dry-run
+```
+
+Tạo `project_moi/output_simple.xml`:
+
+```bash
+python3 tool/generate_simple_xml.py \
+  --project-dir path/to/project_moi
+```
+
+Có thể đặt tên sequence và output riêng:
+
+```bash
+python3 tool/generate_simple_xml.py \
+  --project-dir path/to/project_moi \
+  --sequence-name "Episode Simple Cut" \
+  --output path/to/simple_cut.xml
+```
+
 Cũng có thể truyền từng đường dẫn:
 
 ```bash
@@ -110,6 +150,15 @@ Các đường dẫn tương đối được tính từ thư mục đang chạy 
 > Tool vẫn dùng 6 tình huống TH1–TH6 vì đó là cấu trúc lớn của template `28.8.xml`. Số voice-over và số cut bên trong mỗi bài được phép thay đổi. Slot được thêm sẽ kế thừa filter/thiết lập clip cơ bản gần nhất; các graphic đặc thù ở upper track có thể cần tinh chỉnh thủ công trong Premiere.
 
 ## Build ứng dụng v3
+
+Chạy trực tiếp giao diện PySide6 trên macOS:
+
+```bash
+python3 -m pip install -r tool/requirements.txt
+python3 tool/generate_simple_xml_v3_app.py
+```
+
+Giao diện chỉ dùng light theme, tự quét project ở background và giữ nguyên backend tạo XML hiện có.
 
 Cài dependency build rồi chạy trên đúng hệ điều hành đích:
 

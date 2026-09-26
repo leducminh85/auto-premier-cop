@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Generate a minimal Premiere-compatible FCP XML with only V1 and A1.
+"""Generate a minimal Premiere-compatible FCP XML with spare tracks.
 
 The DOCX is interpreted as an ordered stream of narration rows and video
-timecodes. Narration is placed on A1. Each video cut is placed on V1 with its
-linked source audio on A1. No template, effects, transitions or fixed assets are
-used.
+timecodes. Video cuts are placed on V1 with linked source audio on A1, while
+narration is placed on A2. The remaining tracks are left empty for editing.
+No template, effects, transitions or fixed assets are used.
 """
 
 from __future__ import annotations
@@ -48,6 +48,8 @@ TRANSCRIPT_BLOCK_RE = re.compile(
     rf"(?=^[ \t]*\d+[ \t]*\n[ \t]*{TRANSCRIPT_TIMESTAMP_PATTERN}"
     rf"[ \t]*-->|\Z)"
 )
+VIDEO_TRACK_COUNT = 10
+AUDIO_TRACK_COUNT = 5
 
 
 @dataclass(frozen=True)
@@ -244,11 +246,12 @@ def add_link(
     reference: str,
     media_type: str,
     clip_index: int,
+    track_index: int = 1,
 ) -> None:
     link = ET.SubElement(owner, "link")
     add_text(link, "linkclipref", reference)
     add_text(link, "mediatype", media_type)
-    add_text(link, "trackindex", 1)
+    add_text(link, "trackindex", track_index)
     add_text(link, "clipindex", clip_index)
 
 
@@ -260,7 +263,13 @@ def add_av_links(
 ) -> None:
     for owner in (video_clip, audio_clip):
         add_link(owner, video_clip.get("id", ""), "video", video_index)
-        add_link(owner, audio_clip.get("id", ""), "audio", audio_index)
+        add_link(
+            owner,
+            audio_clip.get("id", ""),
+            "audio",
+            audio_index,
+            track_index=1,
+        )
 
 
 def add_track_footer(track: ET.Element, output_channel: int | None = None) -> None:
@@ -723,28 +732,34 @@ def build_simple_xml(
 
     video_media = ET.SubElement(media_element, "video")
     add_sequence_format(video_media, sequence_details, fps)
-    video_track = ET.SubElement(video_media, "track")
+    video_tracks = [
+        ET.SubElement(video_media, "track") for _ in range(VIDEO_TRACK_COUNT)
+    ]
+    video_track = video_tracks[0]
 
     audio_media = ET.SubElement(media_element, "audio")
     add_text(audio_media, "numOutputChannels", 2)
     audio_format = ET.SubElement(audio_media, "format")
     add_audio_characteristics(audio_format, StreamDetails(sample_rate=48000))
     add_audio_outputs(audio_media)
-    audio_track = ET.SubElement(
-        audio_media,
-        "track",
-        {
-            "premiereTrackType": "Stereo",
-            "currentExplodedTrackIndex": "0",
-            "totalExplodedTrackCount": "1",
-        },
-    )
+    audio_track_attributes = {
+        "premiereTrackType": "Stereo",
+        "currentExplodedTrackIndex": "0",
+        "totalExplodedTrackCount": "1",
+    }
+    audio_tracks = [
+        ET.SubElement(audio_media, "track", audio_track_attributes)
+        for _ in range(AUDIO_TRACK_COUNT)
+    ]
+    source_audio_track = audio_tracks[0]
+    narration_track = audio_tracks[1]
 
     file_ids: dict[Path, str] = {}
     masterclip_ids: dict[Path, str] = {}
     cursor = 0
     video_clip_count = 0
     audio_clip_count = 0
+    source_audio_clip_count = 0
     narration_count = 0
     video_cut_count = 0
 
@@ -758,7 +773,7 @@ def build_simple_xml(
             clip_id = ids.next("clipitem")
             master_id = masterclip_ids.setdefault(media.path, ids.next("masterclip"))
             clip = add_clip_common(
-                audio_track,
+                narration_track,
                 clip_id,
                 master_id,
                 media,
@@ -799,8 +814,9 @@ def build_simple_xml(
         add_source_track(video_clip, "video")
         if details.has_audio:
             audio_clip_count += 1
+            source_audio_clip_count += 1
             audio_clip = add_clip_common(
-                audio_track,
+                source_audio_track,
                 audio_id,
                 master_id,
                 media,
@@ -812,12 +828,19 @@ def build_simple_xml(
             )
             add_file_reference(audio_clip, media, details, fps, True, file_ids, ids)
             add_source_track(audio_clip, "audio")
-            add_av_links(video_clip, audio_clip, video_clip_count, audio_clip_count)
+            add_av_links(
+                video_clip,
+                audio_clip,
+                video_clip_count,
+                source_audio_clip_count,
+            )
         cursor += duration
         video_cut_count += 1
 
-    add_track_footer(video_track)
-    add_track_footer(audio_track, 1)
+    for track in video_tracks:
+        add_track_footer(track)
+    for track in audio_tracks:
+        add_track_footer(track, 1)
     duration_element.text = str(cursor)
     return root, {
         "duration": cursor,
@@ -825,6 +848,8 @@ def build_simple_xml(
         "narrations": narration_count,
         "video_clips": video_clip_count,
         "audio_clips": audio_clip_count,
+        "narration_audio_clips": narration_count,
+        "source_audio_clips": source_audio_clip_count,
         "source_files": len(file_ids),
     }
 
@@ -847,12 +872,28 @@ def validate_simple_xml(root: ET.Element, expected: dict[str, int]) -> None:
         raise GeneratorError("XML không có sequence")
     video_tracks = sequence.findall("./media/video/track")
     audio_tracks = sequence.findall("./media/audio/track")
-    if len(video_tracks) != 1 or len(audio_tracks) != 1:
-        raise GeneratorError("Simple XML phải có đúng một V1 và một A1")
+    if len(video_tracks) != VIDEO_TRACK_COUNT:
+        raise GeneratorError(
+            f"Simple XML phải có đúng {VIDEO_TRACK_COUNT} video track"
+        )
+    if len(audio_tracks) != AUDIO_TRACK_COUNT:
+        raise GeneratorError(
+            f"Simple XML phải có đúng {AUDIO_TRACK_COUNT} audio track"
+        )
     video_clips = video_tracks[0].findall("clipitem")
-    audio_clips = audio_tracks[0].findall("clipitem")
+    source_audio_clips = audio_tracks[0].findall("clipitem")
+    narration_clips = audio_tracks[1].findall("clipitem")
+    audio_clips = narration_clips + source_audio_clips
     if len(video_clips) != expected["video_clips"] or len(audio_clips) != expected["audio_clips"]:
         raise GeneratorError("Số clip trong XML không khớp token kịch bản")
+    if len(narration_clips) != expected["narration_audio_clips"]:
+        raise GeneratorError("Voice-over trong XML không nằm đầy đủ trên A2")
+    if len(source_audio_clips) != expected["source_audio_clips"]:
+        raise GeneratorError("Audio video trong XML không nằm đầy đủ trên A1")
+    if any(track.findall("clipitem") for track in video_tracks[1:]):
+        raise GeneratorError("Các video track V2-V10 phải để trống")
+    if any(track.findall("clipitem") for track in audio_tracks[2:]):
+        raise GeneratorError("Các audio track A3-A5 phải để trống")
     ids = [clip.get("id") for clip in video_clips + audio_clips]
     if len(ids) != len(set(ids)):
         raise GeneratorError("XML có clipitem id bị trùng")
@@ -1055,7 +1096,7 @@ def main() -> int:
             write_output=not args.dry_run,
         )
         print("=" * 68)
-        print("Simple Premiere XML Generator - V1 + A1 only")
+        print("Simple Premiere XML Generator - 10V + 5A")
         print("=" * 68)
         print(f"[SEQUENCE] {args.sequence_name}")
         print(
@@ -1065,7 +1106,8 @@ def main() -> int:
         )
         print(
             f"[TRACKS] V1={summary.video_clip_count} clip, "
-            f"A1={summary.audio_clip_count} clip"
+            f"A1={summary.audio_clip_count - summary.narration_count} audio video, "
+            f"A2={summary.narration_count} voice-over"
         )
         print(f"[DURATION] {summary.duration_seconds:.2f}s")
         print(

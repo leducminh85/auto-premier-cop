@@ -1,0 +1,273 @@
+{
+  "schema_version": 1,
+  "project": {
+    "title": "TEN_BAI_VIET",
+    "sequence_name": "TEN_SEQUENCE",
+    "fps": 60
+  },
+  "media": {
+    "video_dir": "video",
+    "audio_dir": "audio",
+    "audio_order": "natural_sort",
+    "videos": {
+      "TH1": "1.mp4",
+      "TH2": "2.mp4",
+      "TH3": "3.mp4",
+      "TH4": "4.mp4",
+      "TH5": "5.mp4",
+      "TH6": "6.mp4"
+    }
+  },
+  "content": [
+    {
+      "section": "intro",
+      "items": [
+        {
+          "type": "narration",
+          "text": "CAU_DOC_MO_DAU",
+          "audio": "01.mp3"
+        },
+        {
+          "type": "video",
+          "source": "TH1",
+          "purpose": "dramatic_intro",
+          "segments": [
+            {
+              "in": "00:00",
+              "out": "00:05"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "section": "scenario",
+      "id": "TH1",
+      "title": "TIEU_DE_TINH_HUONG_1",
+      "items": [
+        {
+          "type": "video",
+          "source": "TH1",
+          "purpose": "teaser",
+          "segments": [
+            {
+              "in": "00:10",
+              "out": "00:15"
+            }
+          ]
+        },
+        {
+          "type": "narration",
+          "text": "CAU_DOC_TINH_HUONG_1",
+          "audio": "02.mp3"
+        },
+        {
+          "type": "video",
+          "source": "TH1",
+          "purpose": "body",
+          "segments": [
+            {
+              "in": "00:20",
+              "out": "00:45"
+            },
+            {
+              "in": "01:10",
+              "out": "01:30"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "section": "scenario",
+      "id": "TH2",
+      "title": "TIEU_DE_TINH_HUONG_2",
+      "items": [
+        {
+          "type": "video",
+          "source": "TH2",
+          "purpose": "teaser",
+          "segments": [
+            {
+              "in": "00:00",
+              "out": "00:08"
+            }
+          ]
+        },
+        {
+          "type": "narration",
+          "text": "CAU_DOC_TINH_HUONG_2",
+          "audio": "03.mp3"
+        },
+        {
+          "type": "video",
+          "source": "TH2",
+          "purpose": "body",
+          "segments": [
+            {
+              "in": "00:15",
+              "out": "00:40"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "section": "scenario",
+      "id": "TH3",
+      "title": "TIEU_DE_TINH_HUONG_3",
+      "items": [
+        {
+          "type": "video",
+          "source": "TH3",
+          "purpose": "teaser",
+          "segments": [
+            {
+              "in": "00:00",
+              "out": "00:08"
+            }
+          ]
+        },
+        {
+          "type": "narration",
+          "text": "CAU_DOC_TINH_HUONG_3",
+          "audio": "04.mp3"
+        },
+        {
+          "type": "video",
+          "source": "TH3",
+          "purpose": "body",
+          "segments": [
+            {
+              "in": "00:15",
+              "out": "00:40"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "section": "scenario",
+      "id": "TH4",
+      "title": "TIEU_DE_TINH_HUONG_4",
+      "items": [
+        {
+          "type": "video",
+          "source": "TH4",
+          "purpose": "teaser",
+          "segments": [
+            {
+              "in": "00:00",
+              "out": "00:08"
+            }
+          ]
+        },
+        {
+          "type": "narration",
+          "text": "CAU_DOC_TINH_HUONG_4",
+          "audio": "05.mp3"
+        },
+        {
+          "type": "video",
+          "source": "TH4",
+          "purpose": "body",
+          "segments": [
+            {
+              "in": "00:15",
+              "out": "00:40"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "section": "scenario",
+      "id": "TH5",
+      "title": "TIEU_DE_TINH_HUONG_5",
+      "items": [
+        {
+          "type": "video",
+          "source": "TH5",
+          "purpose": "teaser",
+          "segments": [
+            {
+              "in": "00:00",
+              "out": "00:08"
+            }
+          ]
+        },
+        {
+          "type": "narration",
+          "text": "CAU_DOC_TINH_HUONG_5",
+          "audio": "06.mp3"
+        },
+        {
+          "type": "video",
+          "source": "TH5",
+          "purpose": "body",
+          "segments": [
+            {
+              "in": "00:15",
+              "out": "00:40"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "section": "transition",
+      "after": "TH5",
+      "items": [
+        {
+          "type": "narration",
+          "text": "CAU_KET_TINH_HUONG_5_VA_CHUYEN_SANG_TINH_HUONG_6",
+          "audio": "07.mp3"
+        }
+      ]
+    },
+    {
+      "section": "scenario",
+      "id": "TH6",
+      "title": "TIEU_DE_TINH_HUONG_6",
+      "items": [
+        {
+          "type": "video",
+          "source": "TH6",
+          "purpose": "teaser",
+          "segments": [
+            {
+              "in": "00:00",
+              "out": "00:08"
+            }
+          ]
+        },
+        {
+          "type": "narration",
+          "text": "CAU_DOC_TINH_HUONG_6",
+          "audio": "08.mp3"
+        },
+        {
+          "type": "video",
+          "source": "TH6",
+          "purpose": "body",
+          "segments": [
+            {
+              "in": "00:15",
+              "out": "00:40"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "section": "outro",
+      "items": [
+        {
+          "type": "narration",
+          "text": "CAU_KET_BAI_VA_KEU_GOI_BINH_LUAN",
+          "audio": "09.mp3"
+        }
+      ]
+    }
+  ]
+}

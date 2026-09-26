@@ -14,3 +14,12 @@ Copied_28.8.rar
 
 # Generated XML files
 output/
+
+# Project & test data
+26/
+*Karen*
+content/
+test/
+*.zip
+*.rar
+
