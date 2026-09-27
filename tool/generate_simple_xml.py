@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import math
 import os
 import re
 import sys
@@ -67,6 +68,13 @@ class TranscriptBlock:
     text: str
     start_seconds: float
     end_seconds: float
+
+
+@dataclass(frozen=True)
+class TimedWord:
+    text: str
+    start: float
+    end: float
 
 
 @dataclass(frozen=True)
@@ -459,6 +467,199 @@ def parse_content_anchors(
     return words, video_anchors
 
 
+def transcribe_merged_audio(
+    path: Path, model_name: str = "small", language: str | None = None
+) -> list[TimedWord]:
+    """Run local ASR lazily, so the existing modes need no ASR dependency."""
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError as exc:
+        raise GeneratorError(
+            "Một file audio không có transcript cần speech-to-text. "
+            "Cài dependency: python3 -m pip install -r tool/requirements-asr.txt"
+        ) from exc
+    print(f"[ASR] Nhận diện {path.name}, model={model_name} (CPU). "
+          "Lần đầu có thể cần tải model.", flush=True)
+    words: list[TimedWord] = []
+    try:
+        model = WhisperModel(model_name, device="cpu", compute_type="int8")
+        segments, info = model.transcribe(
+            str(path), language=language, word_timestamps=True,
+            vad_filter=True, beam_size=5,
+        )
+        print(f"[ASR] Ngôn ngữ: {info.language}", flush=True)
+        for segment in segments:
+            for word in segment.words or []:
+                if word.end <= word.start:
+                    continue
+                # One ASR word can contain multiple normalized tokens. Keep
+                # their shared time span; never invent sub-word timestamps.
+                words.extend(TimedWord(token, word.start, word.end)
+                             for token in normalized_words(word.word))
+            print(f"[ASR] Đã xử lý đến {segment.end:.1f}s", flush=True)
+    except Exception as exc:
+        raise GeneratorError(f"Không nhận diện được audio: {exc}") from exc
+    if not words:
+        raise GeneratorError("Không nhận diện được lời nói trong audio")
+    return words
+
+
+def detect_audio_silences(path: Path) -> list[tuple[float, float]]:
+    """Measure the source waveform in 10 ms windows, without loading it all.
+
+    ASR timestamps can absorb a pause into the preceding word. Use decoded
+    audio to find real quiet spans of at least 120 ms below -40 dBFS.
+    PyAV and NumPy are already dependencies of the merged-audio ASR mode.
+    """
+    import av
+    import numpy as np
+
+    sample_rate, window = 16000, 160
+    silences: list[tuple[float, float]] = []
+    pending = np.empty(0, dtype=np.float32)
+    elapsed_samples = 0
+    quiet_start: float | None = None
+
+    def consume(samples: object) -> None:
+        nonlocal pending, elapsed_samples, quiet_start
+        pending = np.concatenate((pending, np.asarray(samples).reshape(-1)))
+        count = len(pending) // window
+        if not count:
+            return
+        windows = pending[:count * window].reshape(count, window)
+        quiet = np.sqrt(np.mean(windows * windows, axis=1)) <= 0.01
+        for is_quiet in quiet:
+            time = elapsed_samples / sample_rate
+            if is_quiet and quiet_start is None:
+                quiet_start = time
+            elif not is_quiet and quiet_start is not None:
+                if time - quiet_start >= 0.12:
+                    silences.append((quiet_start, time))
+                quiet_start = None
+            elapsed_samples += window
+        pending = pending[count * window:]
+
+    try:
+        with av.open(str(path)) as container:
+            resampler = av.AudioResampler(format="fltp", layout="mono", rate=sample_rate)
+            for frame in container.decode(audio=0):
+                for converted in resampler.resample(frame):
+                    consume(converted.to_ndarray())
+            for converted in resampler.resample(None):
+                consume(converted.to_ndarray())
+        if quiet_start is not None:
+            end = (elapsed_samples + len(pending)) / sample_rate
+            if end - quiet_start >= 0.12:
+                silences.append((quiet_start, end))
+    except Exception as exc:
+        raise GeneratorError(f"Không kiểm tra được khoảng lặng audio: {exc}") from exc
+    print(f"[SILENCE] Phát hiện {len(silences)} khoảng lặng thực tế", flush=True)
+    return silences
+
+
+def silence_cut_time(
+    before: TimedWord, after: TimedWord,
+    silences: list[tuple[float, float]],
+) -> float:
+    target = (before.end + after.start) * 0.5
+    # Allow small ASR timing errors, but never search across another word.
+    lower = max(before.start, before.end - 0.25)
+    upper = min(after.end, after.start + 0.25)
+    candidates = [(start, end) for start, end in silences
+                  if start >= before.start and end <= upper
+                  and end >= lower and start <= after.start + 0.25]
+    if candidates:
+        start, end = min(candidates, key=lambda span: abs(sum(span) * 0.5 - target))
+        print(f"[SILENCE] Cắt giữa khoảng lặng {start:.3f}s → {end:.3f}s")
+        return (start + end) * 0.5
+    if before.end > after.start:
+        raise GeneratorError("Timestamp chồng lấn và không có khoảng lặng để cắt audio")
+    print("[SILENCE] Không có khoảng lặng phù hợp; dùng ranh giới timestamp lời đọc")
+    return target
+
+
+def align_merged_audio(
+    content_words: list[str], anchors: list[VideoAnchor],
+    words: list[TimedWord], media: MediaInfo, fps: int,
+    silences: list[tuple[float, float]] | None = None,
+) -> list[ScriptToken]:
+    """Align in document order and partition one source at video boundaries.
+
+    Exact matching runs tolerate ASR substitutions/insertions/deletions between
+    runs. Coverage is checked per narration region, not just across the script.
+    Only boundaries with nearby evidence on both sides are accepted.
+    """
+    if not words or not content_words:
+        raise GeneratorError("Không có lời nói hoặc content để so khớp")
+    previous_start = -1.0
+    previous_end = -1.0
+    for word in words:
+        if (not math.isfinite(word.start) or not math.isfinite(word.end)
+                or word.start < 0 or word.end <= word.start
+                or word.start < previous_start or word.end < previous_end
+                or word.end > media.duration_seconds + 0.1):
+            raise GeneratorError("Timestamp speech-to-text không hợp lệ")
+        previous_start, previous_end = word.start, word.end
+
+    mapping: dict[int, int] = {}
+    for match in difflib.SequenceMatcher(
+        None, content_words, [word.text for word in words], autojunk=False
+    ).get_matching_blocks():
+        for offset in range(match.size):
+            mapping[match.a + offset] = match.b + offset
+
+    boundaries = sorted({0, len(content_words), *(a.word_position for a in anchors)})
+    for start, end in zip(boundaries, boundaries[1:]):
+        count = sum(index in mapping for index in range(start, end))
+        confidence = count / (end - start)
+        if confidence < 0.40 or count < min(end - start, 3):
+            preview = " ".join(content_words[start:start + 12])
+            raise GeneratorError(
+                f"Audio không khớp chắc chắn đoạn content {preview!r} "
+                f"({confidence:.0%}). Thử model lớn hơn hoặc kiểm tra lời đọc."
+            )
+        print(f"[MATCH] Từ {start + 1}–{end}: {confidence:.0%}")
+
+    cuts = {0: 0, len(content_words): media.frames}
+    for position in boundaries[1:-1]:
+        left = next((i for i in range(position - 1, max(-1, position - 5), -1)
+                     if i in mapping), None)
+        right = next((i for i in range(position, min(len(content_words), position + 4))
+                      if i in mapping), None)
+        if left is None or right is None:
+            raise GeneratorError(
+                f"Không đủ từ khớp gần điểm chèn video tại từ {position + 1}. "
+                "Thử --asr-model medium hoặc large-v3."
+            )
+        # Infer the word boundary from nearby matching runs. Reject wide ASR
+        # gaps rather than placing a cut somewhere in a long unmatched passage.
+        left_index, right_index = mapping[left], mapping[right]
+        expected_gap = right - left
+        if right_index - left_index > expected_gap + 3:
+            raise GeneratorError(f"Audio có lời thừa/không khớp gần từ {position + 1}")
+        split_index = left_index + round(
+            (position - left) * (right_index - left_index) / expected_gap
+        )
+        split_index = max(left_index + 1, min(right_index, split_index))
+        if left != position - 1 or right != position:
+            print(f"[MATCH] Ước lượng ranh giới từ {position + 1} từ các từ khớp lân cận")
+        before, after = words[split_index - 1], words[split_index]
+        cuts[position] = round(silence_cut_time(before, after, silences or []) * fps)
+
+    result: list[ScriptToken] = []
+    for index, position in enumerate(boundaries):
+        result.extend(anchor.token for anchor in anchors if anchor.word_position == position)
+        if index + 1 == len(boundaries):
+            break
+        source_in, source_out = cuts[position], cuts[boundaries[index + 1]]
+        if not 0 <= source_in < source_out <= media.frames:
+            raise GeneratorError("Điểm cắt audio bị đảo thứ tự hoặc vượt thời lượng")
+        result.append(ScriptToken(kind="audio", audio_index=0,
+                                  source_in=source_in, source_out=source_out))
+        print(f"[CUT] {source_in / fps:.3f}s → {source_out / fps:.3f}s")
+    return result
+
+
 def weighted_median(values: list[tuple[int, int]]) -> int:
     ordered = sorted(values)
     threshold = (sum(weight for _value, weight in ordered) + 1) // 2
@@ -769,7 +970,11 @@ def build_simple_xml(
                 raise GeneratorError("Voice-over token thiếu audio index")
             media = audios[token.audio_index]
             details = audio_details[token.audio_index]
-            duration = media.frames
+            source_in = token.source_in
+            source_out = token.source_out or media.frames
+            if not 0 <= source_in < source_out <= media.frames:
+                raise GeneratorError(f"Range voice-over không hợp lệ: {media.path.name}")
+            duration = source_out - source_in
             clip_id = ids.next("clipitem")
             master_id = masterclip_ids.setdefault(media.path, ids.next("masterclip"))
             clip = add_clip_common(
@@ -778,8 +983,8 @@ def build_simple_xml(
                 master_id,
                 media,
                 cursor,
-                0,
-                duration,
+                source_in,
+                source_out,
                 fps,
                 "mono" if details.audio_channels == 1 else "stereo",
             )
@@ -954,6 +1159,8 @@ def generate_simple_project_xml(
     sequence_name: str | None = None,
     fps: int = 60,
     write_output: bool = True,
+    asr_model: str = "small",
+    asr_language: str | None = None,
 ) -> SimpleGenerationSummary:
     """Generate a clean XML from DOCX, videos and audio without a blueprint."""
     if fps <= 0:
@@ -984,6 +1191,12 @@ def generate_simple_project_xml(
             content, transcript, len(audios), fps
         )
         narration_block_count = len(placements)
+    elif len(audios) == 1:
+        content_words, anchors = parse_content_anchors(content, fps)
+        words = transcribe_merged_audio(audios[0].path, asr_model, asr_language)
+        silences = detect_audio_silences(audios[0].path)
+        tokens = align_merged_audio(content_words, anchors, words, audios[0], fps, silences)
+        narration_block_count = sum(token.kind == "audio" for token in tokens)
     else:
         tokens, narration_lengths = parse_ordered_script(content, fps)
         tokens = rebalance_narration_tokens(tokens, narration_lengths, len(audios))
@@ -1071,6 +1284,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="TXT dạng SRT, mỗi block tương ứng một file voice-over (tùy chọn)",
     )
     parser.add_argument("--output", help="XML đầu ra; mặc định project-dir/output_simple.xml")
+    parser.add_argument("--asr-model", default="small", help="Model ASR cho audio gộp: small, medium, large-v3 hoặc đường dẫn model")
+    parser.add_argument("--asr-language", help="Mã ngôn ngữ lời đọc, ví dụ vi/en; mặc định tự nhận diện")
     parser.add_argument("--sequence-name", help="Tên sequence trong Premiere")
     parser.add_argument("--fps", type=int, default=60, help="Frame rate timeline (mặc định: 60)")
     parser.add_argument("--dry-run", action="store_true", help="Kiểm tra nhưng không ghi XML")
@@ -1094,6 +1309,8 @@ def main() -> int:
             sequence_name=args.sequence_name,
             fps=args.fps,
             write_output=not args.dry_run,
+            asr_model=args.asr_model,
+            asr_language=args.asr_language,
         )
         print("=" * 68)
         print("Simple Premiere XML Generator - 10V + 5A")

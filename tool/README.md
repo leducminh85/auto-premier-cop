@@ -149,6 +149,49 @@ Các đường dẫn tương đối được tính từ thư mục đang chạy 
 
 > Tool vẫn dùng 6 tình huống TH1–TH6 vì đó là cấu trúc lớn của template `28.8.xml`. Số voice-over và số cut bên trong mỗi bài được phép thay đổi. Slot được thêm sẽ kế thừa filter/thiết lập clip cơ bản gần nhất; các graphic đặc thù ở upper track có thể cần tinh chỉnh thủ công trong Premiere.
 
+## Một file audio gộp, không có transcript
+
+`generate_simple_xml.py` tự bật speech-to-text khi thư mục audio chỉ có một
+file và không truyền `--transcript`. Giao diện v3 dùng chung backend nên cũng
+nhận chế độ này khi chạy từ source có cài dependency ASR.
+
+```bash
+python3 -m pip install -r tool/requirements-asr.txt
+python3 tool/generate_simple_xml.py \
+  --project-dir path/to/project_moi \
+  --asr-language vi \
+  --asr-model small
+```
+
+- ASR dùng [faster-whisper](https://github.com/SYSTRAN/faster-whisper), chạy
+  trên CPU tại máy. Lần đầu cần mạng để tải model; không gửi audio đến API.
+  Bỏ `--asr-language` để tự nhận diện ngôn ngữ; dùng `en` cho tiếng Anh.
+- Lấy timestamp từng từ, đối chiếu chuỗi từ với lời dẫn trong DOCX theo thứ tự.
+  Cho phép sai, thiếu hoặc thừa từ; từng vùng lời dẫn giữa các video cut phải
+  đạt ít nhất 40% từ khớp và tối thiểu 3 từ (hoặc toàn bộ nếu vùng ngắn hơn).
+- Điểm chèn video cần từ khớp ở hai phía gần ranh giới. Nếu thiếu một số từ,
+  tool ước lượng ranh giới từ timestamp lân cận; không đủ căn cứ sẽ báo lỗi.
+  Có thể thử `--asr-model medium` hoặc `large-v3` nếu nhận diện chưa tốt.
+- A2 gồm các đoạn tham chiếu **cùng file nguồn** với `in/out` khác nhau.
+  Mỗi vùng lời dẫn giữa các video cut là một clip; không khôi phục chính xác
+  ranh giới các MP3 trước khi merge. Giữ toàn bộ audio, kiểm tra waveform để
+  tìm khoảng lặng thực tế (ít nhất 120 ms, dưới -40 dBFS) gần ranh giới câu,
+  rồi cắt ở giữa khoảng lặng. Nếu không tìm được khoảng lặng phù hợp, dùng
+  ranh giới timestamp lời đọc và ghi log. Không chèn thêm khoảng nghỉ.
+  Video được chèn vào timeline theo content. Timestamp nguồn
+  khác thời gian timeline vì timeline có thêm thời lượng video.
+- Log `[ASR]`, `[MATCH]`, `[CUT]` cho biết tiến độ, tỷ lệ khớp và khoảng cắt.
+  Timestamp ASR là ước lượng; nên nghe lại các điểm chuyển đoạn trong Premiere.
+  `--dry-run` vẫn chạy ASR và kiểm tra alignment nhưng không ghi XML.
+- Nhiều file audio hoặc có `--transcript` tiếp tục dùng chế độ cũ.
+  Dependency ASR cài riêng; các bản ứng dụng đã đóng gói trước đó chưa có thay đổi này.
+
+Kiểm tra tự động phần alignment, range XML và các chế độ cũ (ASR được giả lập):
+
+```bash
+python3 -m unittest discover -s tool -p 'test_merged_audio.py' -v
+```
+
 ## Build ứng dụng v3
 
 Chạy trực tiếp giao diện PySide6 trên macOS:
