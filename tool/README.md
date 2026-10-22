@@ -1,5 +1,30 @@
 # Auto Premiere Pro XML Generator
 
+## Format DOCX linh hoạt trong ứng dụng desktop
+
+Ứng dụng dùng chung một bộ đọc cho preview, xuất XML, transcript và audio gộp.
+Format bảng cũ vẫn được hỗ trợ; không cần thêm “Đoạn kịch tính” trước `Vid1:`.
+
+- Bảng hai cột: nhãn phần và nội dung. Bảng có thêm cột STT/ghi chú cần header
+  `Section`/`Phần` và `Content`/`Nội dung` để xác định đúng cột; cột ghi chú không được đọc.
+- Có thể dùng các đoạn văn thay bảng: đặt tiêu đề phần trên một đoạn riêng,
+  sau đó mỗi đoạn lời đọc hoặc dòng timecode riêng. Có thể trộn bảng và đoạn văn.
+- Nhãn phần: `Intro`, `Introduction`, `Mở đầu`, `Mở bài`; `Vào tình huống 1`,
+  `Tình huống 1`, `TH1`, `Scenario 1`, `Case 1`; `Kết bài`, `Outro`, `Conclusion`.
+  Không phân biệt hoa/thường, dấu tiếng Việt hoặc khoảng trắng.
+- Timecode: `6:23 - 6:27`, `00:06:23.500 --> 00:06:27.000`, dấu `–`, `—`, `→`,
+  `to`, `đến`. Các khoảng cắt có thể nối bằng `+`.
+- Intro cần chỉ rõ nguồn, ví dụ `Vid1: 6:23 - 6:27 + Vid2: 1:53 - 1:58`.
+  Trong tình huống, dòng không ghi nguồn sẽ dùng số tình huống hiện tại.
+- Các dòng teaser lặp trong nhãn tình huống được loại trùng như trước;
+  đoạn cắt lặp trong phần nội dung vẫn được giữ.
+
+Đây là parser theo cấu trúc, không tự hiểu mọi bố cục Word. Giữ lời đọc và
+timecode ở các đoạn riêng. Thiếu số nguồn hoặc timecode sai sẽ báo vị trí để sửa,
+không đoán video. Quy trình media hiện vẫn dùng TH1–TH6. Audio và video thực tế
+vẫn cần đúng thứ tự, nội dung và đủ thời lượng; nhận đúng DOCX không thay thế
+việc kiểm tra media.
+
 Tool tạo timeline Premiere Pro từ một kịch bản Word, 6 video tình huống và các file voice-over. Các track hiệu ứng, BGM, SFX, overlay và nested sequence được giữ từ `Copied_28/28.8.xml`.
 
 Repo có hai phiên bản:

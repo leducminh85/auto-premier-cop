@@ -21,13 +21,12 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
-from docx import Document
+from content_parser import read_content
 
 from generate_xml import (
     GeneratorError,
     MediaInfo,
     ScriptToken,
-    extract_timecodes,
     discover_media,
     existing_directory,
     existing_file,
@@ -38,8 +37,6 @@ from generate_xml import (
 )
 
 
-SCENARIO_RE = re.compile(r"vào\s+tình\s+huống\s*(\d+)", re.IGNORECASE)
-VIDEO_NUMBER_RE = re.compile(r"vid(?:eo)?\s*(\d+)", re.IGNORECASE)
 TRANSCRIPT_TIMESTAMP_PATTERN = r"\d{1,2}:\d{2}:\d{2}[,.]\d{3}"
 TRANSCRIPT_BLOCK_RE = re.compile(
     rf"(?ms)^[ \t]*(?P<index>\d+)[ \t]*\n"
@@ -393,78 +390,18 @@ def normalized_words(value: str) -> list[str]:
 def parse_content_anchors(
     docx_path: Path, fps: int
 ) -> tuple[list[str], list[VideoAnchor]]:
-    """Flatten narration to words while retaining every video's document position."""
-    try:
-        document = Document(docx_path)
-    except Exception as exc:
-        raise GeneratorError(f"Không đọc được DOCX: {docx_path}") from exc
-    if not document.tables:
-        raise GeneratorError("DOCX không có bảng nội dung")
-
     words: list[str] = []
-    video_anchors: list[VideoAnchor] = []
-    current_scenario: int | None = None
-    content_started = False
-    seen_teasers: set[tuple[int, str]] = set()
-    document_order = 0
-
-    for table_index, table in enumerate(document.tables, 1):
-        for row_index, row in enumerate(table.rows, 1):
-            cells = [one_line(cell.text) for cell in row.cells]
-            row_type = cells[0] if cells else ""
-            text = cells[1] if len(cells) > 1 else ""
-            folded_type = row_type.casefold()
-            location = f"bảng {table_index}, dòng {row_index}"
-
-            scenario_match = SCENARIO_RE.search(row_type)
-            if scenario_match:
-                current_scenario = int(scenario_match.group(1))
-                content_started = True
-            elif folded_type in {"intro", "kết bài", "outro"}:
-                content_started = True
-
-            segments = extract_timecodes(text)
-            if segments:
-                source_number = current_scenario
-                if "đoạn kịch tính" in text.casefold():
-                    video_match = VIDEO_NUMBER_RE.search(text)
-                    source_number = int(video_match.group(1)) if video_match else None
-                if source_number is None or not 1 <= source_number <= 6:
-                    raise GeneratorError(f"Không xác định được video tại {location}")
-                if "tình huống" in folded_type:
-                    teaser_key = (source_number, text.casefold())
-                    if teaser_key in seen_teasers:
-                        continue
-                    seen_teasers.add(teaser_key)
-                for start, end in segments:
-                    video_anchors.append(
-                        VideoAnchor(
-                            word_position=len(words),
-                            document_order=document_order,
-                            location=location,
-                            token=ScriptToken(
-                                kind="video",
-                                th_number=source_number,
-                                source_in=round(start * fps),
-                                source_out=round(end * fps),
-                            ),
-                        )
-                    )
-                    document_order += 1
-                continue
-
-            if not content_started or len(row.cells) < 2 or folded_type == "video":
-                continue
-            for paragraph in row.cells[1].paragraphs:
-                narration = one_line(paragraph.text)
-                if narration and not extract_timecodes(narration):
-                    words.extend(normalized_words(narration))
-
+    anchors: list[VideoAnchor] = []
+    for event in read_content(docx_path):
+        if event.kind == "audio":
+            words.extend(normalized_words(event.text))
+        elif event.kind == "video":
+            anchors.append(VideoAnchor(len(words), len(anchors), event.location,
+                ScriptToken(kind="video", th_number=event.source,
+                            source_in=round(event.start * fps), source_out=round(event.end * fps))))
     if not words:
-        raise GeneratorError("Không tìm thấy nội dung để so khớp transcript trong DOCX")
-    if not video_anchors:
-        raise GeneratorError("Không tìm thấy timecode video trong DOCX")
-    return words, video_anchors
+        raise GeneratorError("DOCX has no narration")
+    return words, anchors
 
 
 def transcribe_merged_audio(
@@ -798,77 +735,17 @@ def tokens_from_transcript(
 def parse_ordered_script(
     docx_path: Path, fps: int
 ) -> tuple[list[ScriptToken], list[int]]:
-    """Read narration blocks and video cuts without relying on table indexes."""
-    try:
-        document = Document(docx_path)
-    except Exception as exc:
-        raise GeneratorError(f"Không đọc được DOCX: {docx_path}") from exc
-    if not document.tables:
-        raise GeneratorError("DOCX không có bảng nội dung")
-
     tokens: list[ScriptToken] = []
     narration_lengths: list[int] = []
-    current_scenario: int | None = None
-    intro_started = False
-    seen_teasers: set[tuple[int, str]] = set()
-
-    for table_index, table in enumerate(document.tables):
-        for row_index, row in enumerate(table.rows):
-            cells = [one_line(cell.text) for cell in row.cells]
-            row_type = cells[0] if cells else ""
-            text = cells[1] if len(cells) > 1 else ""
-            row_type_folded = row_type.casefold()
-
-            scenario_match = SCENARIO_RE.search(row_type)
-            if scenario_match:
-                current_scenario = int(scenario_match.group(1))
-            if table_index == 0 and row_type_folded == "intro":
-                intro_started = True
-
-            segments = extract_timecodes(text)
-            if segments:
-                source_number = current_scenario
-                if "đoạn kịch tính" in text.casefold():
-                    video_match = VIDEO_NUMBER_RE.search(text)
-                    source_number = int(video_match.group(1)) if video_match else None
-                if source_number is None or not 1 <= source_number <= 6:
-                    raise GeneratorError(
-                        f"Không xác định được video tại bảng {table_index + 1}, "
-                        f"dòng {row_index + 1}"
-                    )
-                if "tình huống" in row_type_folded:
-                    teaser_key = (source_number, text.casefold())
-                    if teaser_key in seen_teasers:
-                        continue
-                    seen_teasers.add(teaser_key)
-                tokens.extend(
-                    ScriptToken(
-                        kind="video",
-                        th_number=source_number,
-                        source_in=round(start * fps),
-                        source_out=round(end * fps),
-                    )
-                    for start, end in segments
-                )
-                continue
-
-            if table_index == 0 and not intro_started:
-                continue
-            if row_type_folded == "video" or len(row.cells) < 2:
-                continue
-            for paragraph in row.cells[1].paragraphs:
-                narration = one_line(paragraph.text)
-                if not narration or extract_timecodes(narration):
-                    continue
-                narration_lengths.append(len(narration))
-                tokens.append(
-                    ScriptToken(kind="audio", audio_index=len(narration_lengths) - 1)
-                )
-
-    if not any(token.kind == "video" for token in tokens):
-        raise GeneratorError("Không tìm thấy timecode video trong DOCX")
+    for event in read_content(docx_path):
+        if event.kind == "video":
+            tokens.append(ScriptToken(kind="video", th_number=event.source,
+                source_in=round(event.start * fps), source_out=round(event.end * fps)))
+        elif event.kind == "audio":
+            tokens.append(ScriptToken(kind="audio", audio_index=len(narration_lengths)))
+            narration_lengths.append(len(one_line(event.text)))
     if not narration_lengths:
-        raise GeneratorError("Không tìm thấy nội dung lời đọc trong DOCX")
+        raise GeneratorError("DOCX has no narration")
     return tokens, narration_lengths
 
 

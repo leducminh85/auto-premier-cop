@@ -19,7 +19,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
-from docx import Document
+from content_parser import read_content
 
 from generate_xml import (
     AUDIO_EXTENSIONS,
@@ -27,7 +27,6 @@ from generate_xml import (
     GeneratorError,
     existing_directory,
     existing_file,
-    extract_timecodes,
     local_path_from_url,
     natural_sort_key,
     path_to_url,
@@ -40,8 +39,6 @@ from generate_xml import (
 DEFAULT_PROJECT_NAME = "Bài Karen 0509"
 DEFAULT_CONTENT_NAME = "content.docx"
 DEFAULT_XML_NAME = "Bài 0509.xml"
-SCENARIO_RE = re.compile(r"vào\s+tình\s+huống\s*(\d+)", re.IGNORECASE)
-VIDEO_NUMBER_RE = re.compile(r"vid(?:eo)?\s*(\d+)", re.IGNORECASE)
 TH_NUMBER_RE = re.compile(r"TH\s*(\d+)", re.IGNORECASE)
 REFERENCE_TIMECODE_TOLERANCE_SECONDS = 1.25
 
@@ -145,68 +142,8 @@ def resolve_project_file(
 
 
 def parse_docx_video_cuts(docx_path: Path) -> list[VideoCut]:
-    """Read timecodes without assuming that TH1-TH6 occupy table indexes 1-6."""
-    try:
-        document = Document(docx_path)
-    except Exception as exc:
-        raise GeneratorError(f"Không đọc được DOCX: {docx_path}") from exc
-    if not document.tables:
-        raise GeneratorError("DOCX không có bảng nội dung")
-
-    cuts: list[VideoCut] = []
-    current_scenario: int | None = None
-    seen_teasers: set[tuple[int, str]] = set()
-
-    for table_index, table in enumerate(document.tables):
-        for row_index, row in enumerate(table.rows):
-            cells = [one_line(cell.text) for cell in row.cells]
-            row_type = cells[0] if cells else ""
-            text = cells[1] if len(cells) > 1 else ""
-
-            scenario_match = SCENARIO_RE.search(row_type)
-            if scenario_match:
-                current_scenario = int(scenario_match.group(1))
-
-            segments = extract_timecodes(text)
-            if not segments:
-                continue
-
-            if "đoạn kịch tính" in text.lower():
-                video_match = VIDEO_NUMBER_RE.search(text)
-                if video_match is None:
-                    raise GeneratorError(
-                        f"Thiếu số video tại bảng {table_index + 1}, dòng {row_index + 1}"
-                    )
-                source_number = int(video_match.group(1))
-            elif "tình huống" in row_type.lower() or row_type.lower() in {
-                "nội dung",
-                "",
-            }:
-                if current_scenario is None:
-                    raise GeneratorError(
-                        f"Không xác định được tình huống tại bảng {table_index + 1}, "
-                        f"dòng {row_index + 1}"
-                    )
-                source_number = current_scenario
-            else:
-                continue
-
-            if not 1 <= source_number <= 6:
-                raise GeneratorError(f"Số video ngoài TH1-TH6: {source_number}")
-
-            if "tình huống" in row_type.lower():
-                teaser_key = (source_number, one_line(text).casefold())
-                if teaser_key in seen_teasers:
-                    continue
-                seen_teasers.add(teaser_key)
-
-            location = f"bảng {table_index + 1}, dòng {row_index + 1}"
-            for source_in, source_out in segments:
-                cuts.append(VideoCut(source_number, source_in, source_out, location))
-
-    if not cuts:
-        raise GeneratorError("Không tìm thấy timecode video trong DOCX")
-    return cuts
+    return [VideoCut(e.source, e.start, e.end, e.location)
+            for e in read_content(docx_path) if e.kind == "video"]
 
 
 def format_timecode(seconds: float) -> str:
@@ -216,72 +153,15 @@ def format_timecode(seconds: float) -> str:
 
 
 def inspect_docx_components(docx_path: Path) -> list[ArticleComponent]:
-    """Return the article sections shown in the GUI review checklist."""
-    try:
-        document = Document(docx_path)
-    except Exception as exc:
-        raise GeneratorError(f"Không đọc được DOCX: {docx_path}") from exc
-
-    sections: dict[str, dict[str, object]] = {
-        "intro": {"present": False, "cuts": [], "texts": 0},
-        **{
-            f"th{number}": {"present": False, "cuts": [], "texts": 0}
-            for number in range(1, 7)
-        },
-        "outro": {"present": False, "cuts": [], "texts": 0},
-    }
-    current_key: str | None = None
-    seen_teasers: set[tuple[int, str]] = set()
-
-    for table in document.tables:
-        for row in table.rows:
-            cells = [one_line(cell.text) for cell in row.cells]
-            row_type = cells[0] if cells else ""
-            text = cells[1] if len(cells) > 1 else ""
-            row_type_folded = row_type.casefold()
-
-            scenario_match = SCENARIO_RE.search(row_type)
-            if scenario_match:
-                number = int(scenario_match.group(1))
-                if 1 <= number <= 6:
-                    current_key = f"th{number}"
-                    sections[current_key]["present"] = True
-            elif row_type_folded == "intro":
-                current_key = "intro"
-                sections[current_key]["present"] = True
-            elif row_type_folded in {"kết bài", "outro"}:
-                current_key = "outro"
-                sections[current_key]["present"] = True
-
-            segments = extract_timecodes(text)
-            target_key = current_key
-            if "đoạn kịch tính" in text.casefold():
-                target_key = "intro"
-                sections[target_key]["present"] = True
-
-            if segments and target_key:
-                if "tình huống" in row_type_folded and scenario_match:
-                    teaser_key = (int(scenario_match.group(1)), text.casefold())
-                    if teaser_key in seen_teasers:
-                        continue
-                    seen_teasers.add(teaser_key)
-                cuts = sections[target_key]["cuts"]
-                assert isinstance(cuts, list)
-                cuts.extend(
-                    f"{format_timecode(start)} - {format_timecode(end)}"
-                    for start, end in segments
-                )
-                continue
-
-            if target_key and len(row.cells) > 1 and row_type_folded != "video":
-                paragraphs = [
-                    paragraph.text.strip()
-                    for paragraph in row.cells[1].paragraphs
-                    if paragraph.text.strip() and not extract_timecodes(paragraph.text)
-                ]
-                sections[target_key]["texts"] = int(sections[target_key]["texts"]) + len(
-                    paragraphs
-                )
+    sections = {key: {"present": False, "cuts": [], "texts": 0}
+                for key in ["intro", *(f"th{i}" for i in range(1, 7)), "outro"]}
+    for event in read_content(docx_path):
+        data = sections[event.section]
+        data["present"] = True
+        if event.kind == "video":
+            data["cuts"].append(f"{format_timecode(event.start)} - {format_timecode(event.end)}")
+        elif event.kind == "audio":
+            data["texts"] += 1
 
     labels = [("intro", "Intro")]
     labels.extend((f"th{number}", f"Tình huống {number}") for number in range(1, 7))
