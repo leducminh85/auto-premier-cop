@@ -16,12 +16,19 @@ def fold(text: str) -> str:
 
 
 SOURCE = re.compile(r'\b(?:vid(?:eo)?|th|(?:vao\s+)?tinh\s+huong|scenario|case)\s*[#:_-]?\s*(\d+)\b')
+SOURCE_TIME_SEPARATOR = re.compile(rf'({SOURCE.pattern})\s*:(?=\d+:)')
 STAMP = r'\d{1,3}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?'
 RANGE = re.compile(rf'(?<![\d:])({STAMP})\s*(?:-->|->|[-–—−→]|\bto\b|\bden\b)\s*({STAMP})(?![\d:])')
 INTRO = {'intro', 'introduction', 'mo dau', 'mo bai'}
 OUTRO = {'outro', 'conclusion', 'ket bai', 'ket thuc'}
 LABEL_HEADERS = {'type', 'section', 'phan', 'hang muc', 'loai'}
 TEXT_HEADERS = {'content', 'script', 'noi dung', 'loi doc', 'narration'}
+
+
+def normalize_timecodes(text: str) -> str:
+    # Separate an explicit source label from its timestamp (Vid2:2:06).
+    # Keep timestamp boundaries strict so malformed timestamps still fail.
+    return SOURCE_TIME_SEPARATOR.sub(r'\1: ', fold(text))
 
 
 @dataclass(frozen=True)
@@ -105,13 +112,13 @@ def read_content(path: Path) -> list[ContentEvent]:
             events.append(ContentEvent('section', section, location))
             if standalone:
                 continue
-        if label == 'video' and not RANGE.search(fold(body)):
+        if label == 'video' and not RANGE.search(normalize_timecodes(body)):
             continue  # Source-title list in legacy documents.
         for paragraph in paragraphs:
             text = paragraph.strip()
             if not text:
                 continue
-            normalized = fold(text)
+            normalized = normalize_timecodes(text)
             ranges = list(RANGE.finditer(normalized))
             remainder = RANGE.sub('', normalized)
             if re.search(r'\d+:\d+\s*(?:[-–—−→]|to\b|den\b)', remainder):

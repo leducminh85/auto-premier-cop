@@ -61,6 +61,18 @@ class ContentFormatsTests(unittest.TestCase):
         es = self.table([('Intro', 'Hello'), ('Intro', 'Video 1: 0:01 to 0:03 + Vid2: 0:04 --> 0:06')])
         self.assertEqual([e.source for e in es if e.kind == 'video'], [1, 2])
 
+    def test_source_touching_timestamp(self):
+        for label in ['Vid2', 'vid 2', 'Video 2', 'TH2', 'Case #2', 'Tình huống 2']:
+            with self.subTest(label=label):
+                text = f'Đoạn kịch tính {label}:2:06 - 2:12 + 4:39 - 4:42 + Vid1:00:01:02,500 → 00:01:04,000'
+                es = self.table([('Video', text)])
+                cuts = [e for e in es if e.kind == 'video']
+                self.assertEqual([(e.source, e.start, e.end) for e in cuts],
+                                 [(2, 126, 132), (2, 279, 282), (1, 62.5, 64)])
+                self.assertTrue(all(e.text == text for e in cuts))
+                self.assertEqual(len(parse_docx_video_cuts(self.path)), 3)
+                self.assertEqual(sum(c.video_cut_count for c in inspect_docx_components(self.path)), 3)
+
     def test_paragraphs_and_table_in_document_order(self):
         doc = Document()
         for text in ['Document title', 'Introduction', 'Opening', 'TH1', '0:01 – 0:03', 'Body']:
@@ -85,7 +97,9 @@ class ContentFormatsTests(unittest.TestCase):
     def test_ambiguous_and_invalid_fail_in_preview_too(self):
         for text in ['0:01 - 0:03', 'Vid7: 0:01 - 0:03', 'Vid1: 0:03 - 0:01',
                      'Vid1: 0:65 - 1:10', 'Vid1: 0:01 - broken',
-                     'Vid1 Vid2: 0:01 - 0:03']:
+                     'Vid1 Vid2: 0:01 - 0:03', 'Vid1 Vid2:0:01 - 0:03',
+                     'Vid7:0:01 - 0:03', 'Vid1:0:65 - 1:10',
+                     'Vid1:0:03 - 0:01', 'Vid1:0:01 - broken']:
             with self.subTest(text=text):
                 with self.assertRaises(GeneratorError):
                     self.table([('Intro', 'Hello'), ('Intro', text)])
