@@ -86,6 +86,9 @@ Chỉ phát hành sau khi đã thử bản mới trên một máy Windows khác.
   Với bản `3.1.1`, đường dẫn là:
   `https://auto-premier-updates.wevic.vn/releases/Dumi-Cut-Room-3.1.1.exe`.
   Đường dẫn này chỉ có sau khi phát hành bản `3.1.1`.
+  Để tránh trình duyệt hoặc Cloudflare giữ lỗi 404 từ lần truy cập trước,
+  hãy mở `https://auto-premier-updates.wevic.vn/latest.json` và sao chép
+  nguyên đường dẫn trong mục `url`, bao gồm phần `?v=...`, để gửi khách.
 - Không gửi thư mục mã nguồn, Python, file `.release.json` hoặc token tunnel.
   Khách không cần cài Python để chạy bản `.exe`.
 - Khách đã dùng bản có cập nhật: chỉ cần nhắn họ mở app và bấm

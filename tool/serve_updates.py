@@ -11,6 +11,10 @@ from publish_update import DEFAULT_ROOT
 
 
 class ReleaseHandler(SimpleHTTPRequestHandler):
+    def send_response(self, code, message=None):
+        self.response_status = code
+        super().send_response(code, message)
+
     def send_head(self):
         path = urlsplit(self.path).path
         if path in {"/", "/healthz"}:
@@ -31,7 +35,9 @@ class ReleaseHandler(SimpleHTTPRequestHandler):
         return super().send_head()
 
     def end_headers(self):
-        self.send_header("Cache-Control", "no-store" if urlsplit(self.path).path == "/latest.json" else "public, max-age=86400, immutable")
+        cacheable = (getattr(self, "response_status", None) == 200
+                     and urlsplit(self.path).path.startswith("/releases/"))
+        self.send_header("Cache-Control", "public, max-age=86400, immutable" if cacheable else "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         super().end_headers()
 

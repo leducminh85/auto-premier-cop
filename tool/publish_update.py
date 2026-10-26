@@ -27,7 +27,7 @@ def publish(exe: Path, root: Path, notes: str = "") -> Path:
     digest = file_hash(exe)
     release = validate_release({
         "version": config["version"], "platform": config["platform"],
-        "url": manifest_url.rsplit("/", 1)[0] + "/releases/" + destination.name,
+        "url": manifest_url.rsplit("/", 1)[0] + "/releases/" + destination.name + "?v=" + digest[:16],
         "sha256": digest, "size": exe.stat().st_size, "notes": notes,
     })
     latest = root / "latest.json"
