@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from app_update import APP_VERSION, DEFAULT_UPDATE_URL, https_url, version_tuple
 
 
 TOOL_DIR = Path(__file__).resolve().parent
@@ -47,6 +49,12 @@ def find_ffprobe() -> Path:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--version", default=APP_VERSION, help="Phiên bản, ví dụ 3.1.0",
+    )
+    parser.add_argument(
+        "--update-url", default=DEFAULT_UPDATE_URL, help="Địa chỉ HTTPS của latest.json trên máy chủ cập nhật",
+    )
+    parser.add_argument(
         "--dist-dir",
         type=Path,
         default=REPOSITORY / "dist",
@@ -57,12 +65,19 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    version_tuple(args.version)
+    if args.update_url:
+        https_url(args.update_url)
     ffprobe = find_ffprobe()
     app_name, icon_path, bundle_mode = platform_build_settings()
     for asset in (LOGO_PATH, icon_path):
         if not asset.is_file():
             raise SystemExit(f"Không tìm thấy asset build: {asset}")
     build_root = REPOSITORY / "build"
+    build_root.mkdir(exist_ok=True)
+    config_path = build_root / "update_config.json"
+    config = {"version": args.version, "manifest_url": args.update_url}
+    config_path.write_text(json.dumps(config), encoding="utf-8")
     command = [
         sys.executable,
         "-m",
@@ -87,6 +102,8 @@ def main() -> None:
         f"{ffprobe}{os.pathsep}.",
         "--add-data",
         f"{LOGO_PATH}{os.pathsep}.",
+        "--add-data",
+        f"{config_path}{os.pathsep}.",
         str(ENTRY_POINT),
     ]
     print(f"Building {app_name} with {ffprobe.name}...")
@@ -97,6 +114,10 @@ def main() -> None:
     )
     if sys.platform == "darwin":
         artifact = args.dist_dir.resolve() / f"{app_name}.app"
+    if os.name == "nt":
+        artifact.with_suffix(".release.json").write_text(
+            json.dumps({**config, "platform": "windows-x64"}), encoding="utf-8",
+        )
     print(f"Build complete: {artifact}")
 
 

@@ -12,6 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from app_update import helper_main, load_config
+
+if __name__ == "__main__" and len(sys.argv) == 3 and sys.argv[1] == "--apply-update":
+    raise SystemExit(helper_main(sys.argv[2]))
+
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QUrl, Signal, Slot
 from PySide6.QtGui import (
     QAction,
@@ -72,6 +77,7 @@ from generate_simple_xml_v3 import (
     resolve_default_project,
 )
 from generate_xml import AUDIO_EXTENSIONS
+from update_ui import UpdateController
 
 
 @dataclass(frozen=True)
@@ -1386,7 +1392,9 @@ class Sidebar(QFrame):
         self.log_button.setIcon(make_icon("log", THEME.secondary, 18))
         self.log_button.clicked.connect(self.logRequested)
         layout.addWidget(self.log_button)
-        version = QLabel("Phiên bản 3.0 · PySide6")
+        self.update_button = QPushButton("Kiểm tra cập nhật")
+        layout.addWidget(self.update_button)
+        version = QLabel(f"Phiên bản {load_config()['version']}")
         version.setProperty("role", "caption")
         version.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(version)
@@ -1586,6 +1594,7 @@ class XmlGeneratorApp(QMainWindow):
         self._bind_shortcuts()
         self._refresh_ui()
         self._start_default_project_lookup()
+        self.updater = UpdateController(self, self.sidebar.update_button)
 
     def _build_ui(self) -> None:
         surface = GradientSurface()
@@ -2030,7 +2039,7 @@ class XmlGeneratorApp(QMainWindow):
         if not total or not all_ready or selected != total:
             self._show_error_dialog(
                 "Chưa thể xác nhận",
-                "Hãy chọn đủ tất cả thành phần hợp lệ trước khi tiếp tục.",
+                "Hãy kiểm tra và chọn đủ các mục trước khi tiếp tục.",
             )
             return
         self.verified_signature = self._input_signature()
@@ -2255,7 +2264,7 @@ class XmlGeneratorApp(QMainWindow):
                 if busy
                 else f"Đã chọn {selected}/{total} thành phần."
                 if enabled
-                else "Chọn đủ các thành phần hợp lệ để xác nhận."
+                else "Hãy kiểm tra và chọn đủ các mục trước khi tiếp tục."
             )
             self.action_bar.configure(
                 status,
@@ -2374,6 +2383,10 @@ class XmlGeneratorApp(QMainWindow):
             self.review_page.structure.collapseAllDetails()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self.updater.running:
+            self.updater.message("Đang cập nhật", "Hãy chờ kiểm tra hoặc tải bản cập nhật xong rồi đóng app.")
+            event.ignore()
+            return
         if self.busy_kind and not self.close_when_idle:
             answer = QMessageBox.question(
                 self,

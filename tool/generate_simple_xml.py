@@ -37,6 +37,22 @@ from generate_xml import (
 )
 
 
+def format_duration(seconds: float) -> str:
+    """Format media times in plain Vietnamese, preserving milliseconds."""
+    milliseconds = round(seconds * 1000)
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    second_text = f"{remainder / 1000:.3f}".rstrip("0").rstrip(".").replace(".", ",")
+    parts = []
+    if hours:
+        parts.append(f"{hours} giờ")
+    if minutes:
+        parts.append(f"{minutes} phút")
+    if remainder or not parts:
+        parts.append(f"{second_text} giây")
+    return " ".join(parts)
+
+
 TRANSCRIPT_TIMESTAMP_PATTERN = r"\d{1,2}:\d{2}:\d{2}[,.]\d{3}"
 TRANSCRIPT_BLOCK_RE = re.compile(
     rf"(?ms)^[ \t]*(?P<index>\d+)[ \t]*\n"
@@ -400,7 +416,7 @@ def parse_content_anchors(
                 ScriptToken(kind="video", th_number=event.source,
                             source_in=round(event.start * fps), source_out=round(event.end * fps))))
     if not words:
-        raise GeneratorError("DOCX has no narration")
+        raise GeneratorError("Không tìm thấy nội dung lời đọc trong file Word.")
     return words, anchors
 
 
@@ -658,8 +674,8 @@ def align_transcript_blocks(
         if matched_words < minimum_matches or confidence < 0.40:
             preview = " ".join(words[:12])
             raise GeneratorError(
-                f"Không xác định chắc chắn vị trí transcript block {block.index} "
-                f"({confidence:.0%} khớp): {preview!r}"
+                f"Đoạn lời đọc số {block.index} chưa khớp với nội dung Word. "
+                f"Hãy kiểm tra lại đoạn: “{preview}”."
             )
 
         word_start = max(0, weighted_median(start_estimates))
@@ -669,7 +685,7 @@ def align_transcript_blocks(
         word_start = min(word_start, matched_start)
         if word_start < previous_start:
             raise GeneratorError(
-                f"Transcript block {block.index} bị đảo thứ tự so với block trước"
+                f"Đoạn lời đọc số {block.index} không đúng thứ tự trong file Word. Hãy kiểm tra lại."
             )
         previous_start = word_start
         placements.append(
@@ -693,8 +709,8 @@ def tokens_from_transcript(
     blocks = parse_transcript_file(transcript_path)
     if len(blocks) != audio_count:
         raise GeneratorError(
-            f"Transcript có {len(blocks)} block nhưng thư mục voice-over có "
-            f"{audio_count} file. Mỗi block phải ứng với đúng một file audio."
+            f"Có {len(blocks)} đoạn lời đọc nhưng có {audio_count} file âm thanh. "
+            "Mỗi đoạn cần một file âm thanh."
         )
     content_words, video_anchors = parse_content_anchors(docx_path, fps)
     placements = align_transcript_blocks(content_words, blocks)
@@ -710,8 +726,8 @@ def tokens_from_transcript(
         )
         if crossed is not None:
             raise GeneratorError(
-                f"Transcript block {placement.block.index} đi qua video cut tại "
-                f"{crossed.location}. Cần tách audio tại vị trí này."
+                f"Cần tách đoạn lời đọc số {placement.block.index} thành hai file âm thanh "
+                f"tại {crossed.location} để chèn video."
             )
 
     ordered: list[tuple[int, int, int, ScriptToken]] = []
@@ -745,7 +761,7 @@ def parse_ordered_script(
             tokens.append(ScriptToken(kind="audio", audio_index=len(narration_lengths)))
             narration_lengths.append(len(one_line(event.text)))
     if not narration_lengths:
-        raise GeneratorError("DOCX has no narration")
+        raise GeneratorError("Không tìm thấy nội dung lời đọc trong file Word.")
     return tokens, narration_lengths
 
 
@@ -755,9 +771,9 @@ def rebalance_narration_tokens(
     """Map every supplied audio file to ordered narration positions in the DOCX."""
     block_count = len(narration_lengths)
     if audio_count <= 0:
-        raise GeneratorError("Thư mục audio không có file voice-over")
+        raise GeneratorError("Thư mục đã chọn chưa có file lời đọc.")
     if block_count <= 0:
-        raise GeneratorError("DOCX không có vị trí để đặt voice-over")
+        raise GeneratorError("Không tìm thấy nội dung lời đọc trong file Word.")
 
     allocations = [0] * block_count
     if audio_count >= block_count:
@@ -783,7 +799,8 @@ def rebalance_narration_tokens(
         narration_index += 1
     if audio_index != audio_count:
         raise GeneratorError(
-            f"Không thể ánh xạ đủ audio: đã dùng {audio_index}/{audio_count} file"
+            f"Còn {audio_count - audio_index} file âm thanh chưa ghép được vào nội dung. "
+            "Hãy kiểm tra lại file Word và các file âm thanh."
         )
     return result
 
@@ -1060,8 +1077,8 @@ def generate_simple_project_xml(
 
     videos, audios = discover_media(video_dir, audio_dir, fps)
     if set(videos) != set(range(1, 7)):
-        found = ", ".join(f"TH{number}" for number in sorted(videos)) or "không có"
-        raise GeneratorError(f"Cần đúng video TH1-TH6; hiện tìm thấy: {found}")
+        found = ", ".join(str(number) for number in sorted(videos)) or "không có"
+        raise GeneratorError(f"Cần đủ video từ 1 đến 6. Hiện tìm thấy: {found}.")
     if transcript is not None:
         audios = sorted(audios, key=lambda media: natural_sort_key(media.path.name))
         tokens, placements = tokens_from_transcript(
@@ -1084,9 +1101,9 @@ def generate_simple_project_xml(
             continue
         if token.source_out > videos[token.th_number].frames:
             raise GeneratorError(
-                f"Timecode TH{token.th_number} kết thúc ở "
-                f"{token.source_out / fps:.2f}s, vượt video "
-                f"{videos[token.th_number].duration_seconds:.2f}s"
+                f"Video {token.th_number} chỉ dài {format_duration(videos[token.th_number].duration_seconds)}, "
+                f"nhưng thời gian cắt kết thúc ở {format_duration(token.source_out / fps)}. "
+                "Hãy sửa lại trong file Word."
             )
 
     root, expected = build_simple_xml(sequence_name, tokens, videos, audios, fps)

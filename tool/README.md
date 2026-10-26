@@ -1,5 +1,11 @@
 # Auto Premiere Pro XML Generator
 
+## Cập nhật tự động cho bản Windows
+
+Ứng dụng có nút **Kiểm tra cập nhật** và kiểm tra bản mới khi mở app.
+Xem [hướng dẫn máy chủ cập nhật](UPDATES.md) để tạo tunnel, đóng gói bản có địa chỉ
+cập nhật và phát hành. Khách dùng EXE cũ cần thay bản có bộ cập nhật một lần.
+
 ## Format DOCX linh hoạt trong ứng dụng desktop
 
 Ứng dụng dùng chung một bộ đọc cho preview, xuất XML, transcript và audio gộp.

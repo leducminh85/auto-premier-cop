@@ -42,14 +42,20 @@ class ContentEvent:
     end: float = 0
 
 
-def seconds(stamp: str) -> float:
+def seconds(stamp: str, location: str = '') -> float:
     parts = stamp.replace(',', '.').split(':')
     if any(float(p) >= 60 for p in parts[1:]):
-        raise GeneratorError(f'Timecode không hợp lệ: {stamp}')
+        raise GeneratorError(invalid_time_message(location))
     value = 0.0
     for part in parts:
         value = value * 60 + float(part)
     return value
+
+
+def invalid_time_message(location: str) -> str:
+    where = f' tại {location}' if location else ''
+    return (f'Thời gian cắt{where} không hợp lệ. Hãy kiểm tra lại giờ, phút, giây '
+            'và bảo đảm thời gian kết thúc lớn hơn thời gian bắt đầu.')
 
 
 def rows(document):
@@ -107,7 +113,7 @@ def read_content(path: Path) -> list[ContentEvent]:
         elif match:
             scenario = int(match.group(1))
             if not 1 <= scenario <= 6:
-                raise GeneratorError(f'Số video ngoài TH1–TH6 tại {location}: {scenario}')
+                raise GeneratorError(f'Số video {scenario} tại {location} không hợp lệ. Chỉ dùng số từ 1 đến 6.')
             section = f'th{scenario}'
             events.append(ContentEvent('section', section, location))
             if standalone:
@@ -122,7 +128,7 @@ def read_content(path: Path) -> list[ContentEvent]:
             ranges = list(RANGE.finditer(normalized))
             remainder = RANGE.sub('', normalized)
             if re.search(r'\d+:\d+\s*(?:[-–—−→]|to\b|den\b)', remainder):
-                raise GeneratorError(f'Timecode chưa đọc được tại {location}: {text}')
+                raise GeneratorError(f'Không đọc được thời gian cắt tại {location}. Hãy ghi theo mẫu: “0:10 - 0:20”.')
             if not ranges:
                 if section:
                     events.append(ContentEvent('audio', section, location, text))
@@ -138,13 +144,15 @@ def read_content(path: Path) -> list[ContentEvent]:
                 if explicit:
                     numbers = {int(s.group(1)) for s in explicit}
                     if len(numbers) != 1:
-                        raise GeneratorError(f'Nhiều số video không rõ ràng tại {location}: {text}')
+                        raise GeneratorError(f'Có nhiều số video tại {location}. Hãy ghi rõ video cần dùng cho từng đoạn.')
                     active_source = numbers.pop()
-                if active_source is None or not 1 <= active_source <= 6:
-                    raise GeneratorError(f'Không xác định được video tại {location}. Ghi Vid1: hoặc TH1 trước timecode.')
-                start, end = map(seconds, time_range.groups())
+                if active_source is None:
+                    raise GeneratorError(f'Chưa biết dùng video nào tại {location}. Hãy ghi thêm, ví dụ: “Vid1: 0:10 - 0:20”.')
+                if not 1 <= active_source <= 6:
+                    raise GeneratorError(f'Số video {active_source} tại {location} không hợp lệ. Chỉ dùng số từ 1 đến 6.')
+                start, end = (seconds(stamp, location) for stamp in time_range.groups())
                 if end <= start:
-                    raise GeneratorError(f'Timecode không hợp lệ tại {location}: {time_range.group()}')
+                    raise GeneratorError(invalid_time_message(location))
                 parsed.append(ContentEvent('video', section or 'intro', location, text, active_source, start, end))
                 previous_end = time_range.end()
             key = tuple((e.source, e.start, e.end) for e in parsed)
@@ -154,5 +162,5 @@ def read_content(path: Path) -> list[ContentEvent]:
                 seen_teasers.add(key)
             events.extend(parsed)
     if not any(e.kind == 'video' for e in events):
-        raise GeneratorError('Không tìm thấy timecode video trong DOCX')
+        raise GeneratorError('File Word chưa có thời gian cắt video. Hãy thêm, ví dụ: “Vid1: 0:10 - 0:20”.')
     return events

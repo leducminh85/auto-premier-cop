@@ -229,7 +229,7 @@ def discover_media(video_dir: Path, audio_dir: Path, fps: int) -> tuple[dict[int
         match = TH_RE.search(path.name)
         number = int(match.group(1)) if match else fallback_number
         if number in videos:
-            raise GeneratorError(f"Có nhiều video cùng ánh xạ vào TH{number}")
+            raise GeneratorError(f"Có nhiều file cùng mang số video {number}. Hãy kiểm tra lại tên file.")
         info = probe_media(path, fps, require_video=True)
         videos[number] = info
         print(f"  TH{number}: {path.name} ({info.duration_seconds:.2f}s)")

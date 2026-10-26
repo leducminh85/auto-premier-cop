@@ -7,6 +7,7 @@ __pycache__/
 .venv/
 build/
 dist/
+update-server/
 
 # Large Premiere template/media workspace
 Copied_28/
