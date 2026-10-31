@@ -15,7 +15,7 @@ import time
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-APP_VERSION = "3.1.0"
+APP_VERSION = "3.1.2"
 DEFAULT_UPDATE_URL = "https://auto-premier-updates.wevic.vn/latest.json"
 MAX_DOWNLOAD = 2 * 1024 ** 3
 

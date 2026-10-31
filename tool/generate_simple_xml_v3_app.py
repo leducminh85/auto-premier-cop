@@ -9,6 +9,7 @@ import sys
 import traceback
 import unicodedata
 from dataclasses import dataclass
+from html import escape
 from pathlib import Path
 from typing import Callable
 
@@ -24,6 +25,8 @@ from PySide6.QtGui import (
     QCloseEvent,
     QDesktopServices,
     QFontDatabase,
+    QFont,
+    QFontMetrics,
     QIcon,
     QKeySequence,
     QLinearGradient,
@@ -374,6 +377,9 @@ def make_icon(kind: str, color: str = THEME.text, size: int = 22) -> QIcon:
         )
         painter.drawLine(int(s * 0.29), int(s * 0.51), int(s * 0.43), int(s * 0.65))
         painter.drawLine(int(s * 0.43), int(s * 0.65), int(s * 0.72), int(s * 0.35))
+    elif kind == "close":
+        painter.drawLine(int(s*.25), int(s*.25), int(s*.75), int(s*.75))
+        painter.drawLine(int(s*.75), int(s*.25), int(s*.25), int(s*.75))
     elif kind == "log":
         for y in (0.28, 0.5, 0.72):
             painter.drawEllipse(int(s * 0.15), int(s * y - 1), 2, 2)
@@ -452,7 +458,7 @@ QScrollArea {{ border: none; background: transparent; }}
 QScrollBar:vertical {{ background: transparent; width: 9px; margin: 2px; }}
 QScrollBar::handle:vertical {{ background: #C7D4E3; min-height: 40px; border-radius: 4px; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-QToolTip {{ background: {THEME.navy}; color: white; border: none; padding: 6px; }}
+QToolTip {{ background: {THEME.navy}; color: white; border: 1px solid #354264; padding: 8px 10px; font-family: 'Segoe UI'; font-size: 12px; }}
 """
 
 
@@ -474,8 +480,24 @@ class ElideLabel(QLabel):
 
     def setFullText(self, text: str) -> None:
         self._full_text = text
-        self.setToolTip(text)
+        font = QFont('Segoe UI')
+        font.setPixelSize(12)
+        metrics = QFontMetrics(font)
+        lines, line = [], ''
+        for char in text:
+            if char == '\n' or (line and metrics.horizontalAdvance(line + char) > 360):
+                lines.append(escape(line))
+                line = ''
+            if char != '\n':
+                line += char
+        if line:
+            lines.append(escape(line))
+        self.setToolTip('<qt>' + '<br>'.join(lines) + '</qt>' if text else '')
+        self.setToolTipDuration(10000)
         self._update_elision()
+
+    def fullText(self) -> str:
+        return self._full_text
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -606,7 +628,8 @@ class SourceCard(QFrame):
         self.choose_button.clicked.connect(
             lambda: self.chooseRequested.emit(self.key)
         )
-        self.clear_button = QPushButton("Bỏ chọn")
+        self.clear_button = QPushButton()
+        self.clear_button.setIcon(make_icon("close", THEME.secondary, 18))
         self.clear_button.clicked.connect(
             lambda: self.clearRequested.emit(self.key)
         )
@@ -627,13 +650,14 @@ class SourceCard(QFrame):
         actions.addWidget(self.copy_button)
         actions.addWidget(self.open_button)
         outer.addLayout(actions)
+        self.setCompact(True)
 
     def setPathState(self, path: Path | None, state: str, message: str) -> None:
         self.current_path = str(path) if path else ""
         if path:
             self.name_label.setFullText(path.name)
             self.path_label.setFullText(str(path))
-            self.choose_button.setText("Thay đổi")
+            self.choose_button.setToolTip("Thay đổi nguồn")
         else:
             self.name_label.setFullText(
                 "Không sử dụng" if self.optional else "Chưa chọn nguồn"
@@ -643,7 +667,7 @@ class SourceCard(QFrame):
                 if self.optional
                 else "Chọn thủ công hoặc đổi project để tự phát hiện."
             )
-            self.choose_button.setText("Chọn file" if self.optional else "Chọn nguồn")
+            self.choose_button.setToolTip("Chọn file" if self.optional else "Chọn nguồn")
 
         badge_text, badge_state = {
             "ready": ("Sẵn sàng", "ready"),
@@ -667,20 +691,17 @@ class SourceCard(QFrame):
         self.clear_button.setDisabled(busy or not self.current_path)
 
     def setCompact(self, compact: bool) -> None:
-        if compact:
-            self.copy_button.setText("")
-            self.copy_button.setFixedWidth(36)
-            self.copy_button.setToolTip("Copy đường dẫn")
-            self.open_button.setText("")
-            self.open_button.setFixedWidth(36)
-            self.open_button.setToolTip(f"Mở trong {FILE_MANAGER}")
-        else:
-            self.copy_button.setText("Copy")
-            self.copy_button.setMaximumWidth(16777215)
-            self.copy_button.setMinimumWidth(0)
-            self.open_button.setText(f"Mở {FILE_MANAGER}")
-            self.open_button.setMaximumWidth(16777215)
-            self.open_button.setMinimumWidth(0)
+        for button, tip in (
+            (self.choose_button, 'Chọn hoặc thay đổi nguồn'),
+            (self.clear_button, 'Bỏ chọn nguồn'),
+            (self.copy_button, 'Sao chép đường dẫn'),
+            (self.open_button, 'Mở trong thư mục'),
+        ):
+            button.setText('')
+            button.setProperty('variant', 'icon')
+            button.setFixedSize(36, 36)
+            button.setToolTip(tip)
+            button.setAccessibleName(tip)
 
     def contextMenuEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         if not self.current_path:
@@ -797,7 +818,9 @@ class ExportSettingsCard(QFrame):
         layout.addWidget(self.output_name)
         layout.addWidget(self.output_path)
         actions = QHBoxLayout()
-        self.choose_button = QPushButton("Chọn vị trí lưu")
+        self.choose_button = QPushButton()
+        self.choose_button.setIcon(make_icon("folder", "#1678B3", 18))
+        self.choose_button.setToolTip("Chọn vị trí lưu XML")
         self.choose_button.setProperty("variant", "soft")
         self.choose_button.clicked.connect(self.chooseOutputRequested)
         self.copy_button = QPushButton()
@@ -805,20 +828,26 @@ class ExportSettingsCard(QFrame):
         self.copy_button.setIcon(make_icon("copy", THEME.secondary, 18))
         self.copy_button.setToolTip("Copy đường dẫn XML")
         self.copy_button.clicked.connect(
-            lambda: self.copyOutputRequested.emit(self.output_path.toolTip())
+            lambda: self.copyOutputRequested.emit(self.output_path.fullText())
         )
         self.open_button = QPushButton()
         self.open_button.setProperty("variant", "icon")
         self.open_button.setIcon(make_icon("open", THEME.secondary, 18))
         self.open_button.setToolTip(f"Mở trong {FILE_MANAGER}")
         self.open_button.clicked.connect(
-            lambda: self.openOutputRequested.emit(self.output_path.toolTip())
+            lambda: self.openOutputRequested.emit(self.output_path.fullText())
         )
         actions.addWidget(self.choose_button)
         actions.addStretch(1)
         actions.addWidget(self.copy_button)
         actions.addWidget(self.open_button)
         layout.addLayout(actions)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for button in (self.choose_button, self.copy_button, self.open_button):
+            button.setProperty('variant', 'icon')
+            button.setFixedSize(36, 36)
+            button.setAccessibleName(button.toolTip())
 
     def setValues(self, sequence: str, output: Path | None) -> None:
         self.sequence_edit.blockSignals(True)
@@ -834,8 +863,8 @@ class ExportSettingsCard(QFrame):
     def setBusy(self, busy: bool) -> None:
         self.sequence_edit.setDisabled(busy)
         self.choose_button.setDisabled(busy)
-        self.copy_button.setDisabled(busy or not self.output_path.toolTip())
-        self.open_button.setDisabled(busy or not self.output_path.toolTip())
+        self.copy_button.setDisabled(busy or not self.output_path.fullText())
+        self.open_button.setDisabled(busy or not self.output_path.fullText())
 
 
 class WelcomePage(QWidget):
@@ -863,7 +892,7 @@ class WelcomePage(QWidget):
         title.setMinimumHeight(42)
         body = QLabel(
             "Chọn thư mục chứa content DOCX, video và voice-over. "
-            f"{APP_NAME} sẽ tự tìm các nguồn hiện có."
+            # f"{APP_NAME} sẽ tự tìm các nguồn hiện có."
         )
         body.setProperty("role", "body")
         body.setWordWrap(True)
@@ -910,15 +939,6 @@ class SetupPage(QScrollArea):
             "",
         )
         outer.addWidget(self.header)
-        self.notice = QLabel()
-        self.notice.setWordWrap(True)
-        self.notice.setProperty("role", "error")
-        self.notice.setStyleSheet(
-            f"background: {THEME.error_soft}; border-radius: 12px; "
-            f"padding: 10px 13px; color: {THEME.error};"
-        )
-        self.notice.hide()
-        outer.addWidget(self.notice)
         self.grid = QGridLayout()
         self.grid.setContentsMargins(0, 0, 0, 0)
         self.grid.setHorizontalSpacing(18)
@@ -956,6 +976,21 @@ class SetupPage(QScrollArea):
             card.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
             )
+        # Independent columns keep source cards aligned without stretching settings.
+        self.sources_column = QWidget()
+        source_layout = QVBoxLayout(self.sources_column)
+        source_layout.setContentsMargins(0, 0, 0, 0)
+        source_layout.setSpacing(18)
+        for card in self.source_cards.values():
+            source_layout.addWidget(card)
+        source_layout.addStretch()
+        self.settings_column = QWidget()
+        settings_layout = QVBoxLayout(self.settings_column)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
+        settings_layout.setSpacing(18)
+        settings_layout.addWidget(self.summary)
+        settings_layout.addWidget(self.export)
+        settings_layout.addStretch()
         outer.addLayout(self.grid)
         outer.addStretch(1)
         self._compact: bool | None = None
@@ -973,27 +1008,18 @@ class SetupPage(QScrollArea):
             item = self.grid.takeAt(0)
             if item.widget():
                 item.widget().setParent(self.content)
-        cards = list(self.source_cards.values())
-        for card in cards:
-            card.setCompact(compact)
+        self.grid.addWidget(self.sources_column, 0, 0)
         if compact:
-            for row, card in enumerate(cards):
-                self.grid.addWidget(card, row, 0)
-            self.grid.addWidget(self.summary, len(cards), 0)
-            self.grid.addWidget(self.export, len(cards) + 1, 0)
+            self.grid.addWidget(self.settings_column, 1, 0)
             self.grid.setColumnStretch(0, 1)
             self.grid.setColumnStretch(1, 0)
         else:
-            for row, card in enumerate(cards):
-                self.grid.addWidget(card, row, 0)
-            self.grid.addWidget(self.summary, 0, 1)
-            self.grid.addWidget(self.export, 1, 1, len(cards) - 1, 1)
+            self.grid.addWidget(self.settings_column, 0, 1)
             self.grid.setColumnStretch(0, 2)
             self.grid.setColumnStretch(1, 1)
 
     def showNotice(self, text: str = "") -> None:
-        self.notice.setText(text)
-        self.notice.setVisible(bool(text))
+        pass  # Errors are displayed in the popup, not a second banner.
 
 
 class StructureReview(QFrame):
@@ -1306,7 +1332,6 @@ class ResultPage(QWidget):
 
 class Sidebar(QFrame):
     changeProjectRequested = Signal()
-    logRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1391,10 +1416,6 @@ class Sidebar(QFrame):
             self.step_rows.append((row, icon, label))
 
         layout.addStretch(1)
-        self.log_button = QPushButton("Nhật ký")
-        self.log_button.setIcon(make_icon("log", THEME.secondary, 18))
-        self.log_button.clicked.connect(self.logRequested)
-        layout.addWidget(self.log_button)
         self.update_button = QPushButton("Kiểm tra cập nhật")
         layout.addWidget(self.update_button)
         version = QLabel(f"Phiên bản {load_config()['version']}")
@@ -1608,7 +1629,6 @@ class XmlGeneratorApp(QMainWindow):
         shell.setSpacing(0)
         self.sidebar = Sidebar()
         self.sidebar.changeProjectRequested.connect(self._browse_project)
-        self.sidebar.logRequested.connect(self._toggle_log)
         shell.addWidget(self.sidebar)
 
         workspace = QWidget()
@@ -2197,7 +2217,7 @@ class XmlGeneratorApp(QMainWindow):
         self, states: dict[str, tuple[str, str]]
     ) -> str:
         if not self.project_path:
-            return "Cần chọn project"
+            return ""
         if any(state == "error" for state, _ in states.values()):
             return "Nguồn cần xử lý"
         if not all(
@@ -2315,9 +2335,6 @@ class XmlGeneratorApp(QMainWindow):
     def _toggle_log(self) -> None:
         visible = not self.log_panel.isVisible()
         self.log_panel.setVisible(visible)
-        self.sidebar.log_button.setText(
-            "Ẩn nhật ký" if visible else "Nhật ký"
-        )
 
     def _log(self, message: str, level: str = "info") -> None:
         self.log_panel.append(message, level)
