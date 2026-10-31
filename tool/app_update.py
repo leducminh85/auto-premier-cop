@@ -15,7 +15,7 @@ import time
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-APP_VERSION = "3.1.2"
+APP_VERSION = "3.1.3"
 DEFAULT_UPDATE_URL = "https://auto-premier-updates.wevic.vn/latest.json"
 MAX_DOWNLOAD = 2 * 1024 ** 3
 
@@ -259,3 +259,39 @@ def helper_main(job_path: str) -> int:
         )
         return 1
     return 0
+
+
+def cleanup_completed_updates(target: Path) -> None:
+    """Remove only completed staging files for this exact installed application."""
+    target = target.resolve()
+    allowed = {'job.json', 'result.json', 'previous.exe', 'updater.exe', 'new.exe'}
+    for stage in target.parent.glob('.dumi-update-*'):
+        try:
+            if stage.is_symlink() or stage.is_junction() or not stage.is_dir():
+                continue
+            if stage.resolve().parent != target.parent:
+                continue
+            children = list(stage.iterdir())
+            if any(p.name not in allowed or p.is_symlink() or not p.is_file() for p in children):
+                continue
+            job = json.loads((stage / 'job.json').read_text(encoding='utf-8'))
+            result = json.loads((stage / 'result.json').read_text(encoding='utf-8'))
+            if Path(job['target']).resolve() != target or result.get('updated') != job['version']:
+                continue
+            # The copied updater may still be exiting. Preserve metadata for retries.
+            for name in ('updater.exe', 'previous.exe', 'new.exe'):
+                (stage / name).unlink(missing_ok=True)
+            (stage / 'job.json').unlink()
+            (stage / 'result.json').unlink()
+            stage.rmdir()
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+
+
+def cleanup_updates_after_startup() -> None:
+    if not getattr(sys, 'frozen', False):
+        return
+    # result.json can be written just after the new app launches.
+    for delay in (2, 5, 15):
+        time.sleep(delay)
+        cleanup_completed_updates(Path(sys.executable))

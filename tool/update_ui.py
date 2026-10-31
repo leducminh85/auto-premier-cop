@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QVBoxLayout,
 )
 
-from app_update import UpdateError, check_release, download_release, launch_helper, load_config
+from app_update import UpdateError, check_release, download_release, launch_helper, load_config, cleanup_updates_after_startup
 
 
 class UpdateDialog(QDialog):
@@ -125,7 +125,8 @@ class UpdateController(QObject):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll)
         self.timer.start(200)
-        QTimer.singleShot(5000, lambda: self.check(False))
+        QTimer.singleShot(0, lambda: self.check(False))
+        Thread(target=cleanup_updates_after_startup, daemon=True).start()
 
     def background(self, kind, function):
         self.running = True

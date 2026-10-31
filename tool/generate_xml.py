@@ -17,6 +17,9 @@ import re
 import subprocess
 import sys
 import tempfile
+import gzip
+import shutil
+import threading
 import urllib.parse
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -132,15 +135,35 @@ def hidden_subprocess_options() -> dict[str, object]:
     }
 
 
-def run_ffprobe(path: Path) -> dict:
+_probe_lock = threading.Lock()
+
+
+def resolve_ffprobe() -> str:
     executable = "ffprobe.exe" if os.name == "nt" else "ffprobe"
     bundle_root = getattr(sys, "_MEIPASS", None)
     bundled_executable = Path(bundle_root, executable) if bundle_root else None
-    ffprobe_command = (
+    if bundled_executable is not None:
+        packed = bundled_executable.with_name(executable + '.gz')
+        if packed.is_file():
+            with _probe_lock:
+                if not bundled_executable.is_file():
+                    temporary = bundled_executable.with_suffix('.extracting')
+                    try:
+                        with gzip.open(packed, 'rb') as source, temporary.open('wb') as dest:
+                            shutil.copyfileobj(source, dest)
+                        temporary.chmod(0o755)
+                        os.replace(temporary, bundled_executable)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+    return (
         str(bundled_executable)
         if bundled_executable is not None and bundled_executable.is_file()
         else executable
     )
+
+
+def run_ffprobe(path: Path) -> dict:
+    ffprobe_command = resolve_ffprobe()
     try:
         result = subprocess.run(
             [

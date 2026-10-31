@@ -33,6 +33,31 @@ class UpdateTests(unittest.TestCase):
             with patch.object(updater, "open_url", return_value=BytesIO(json.dumps(self.release).encode())):
                 self.assertEqual(updater.check_release(self.release["url"], current) is not None, available)
 
+    def test_cleanup_only_completed_updates_for_this_app(self):
+        job = self.stage()
+        updater.cleanup_completed_updates(self.target)
+        self.assertTrue(job.exists())
+        (job.parent / 'result.json').write_text(json.dumps({'updated': '3.2.0'}))
+        updater.cleanup_completed_updates(self.root / 'other.exe')
+        self.assertTrue(job.exists())
+        extra = job.parent / 'personal.txt'
+        extra.write_text('Keep me')
+        updater.cleanup_completed_updates(self.target)
+        self.assertTrue(extra.exists())
+        extra.unlink()
+        updater.cleanup_completed_updates(self.target)
+        self.assertFalse(job.parent.exists())
+        self.assertEqual(self.target.read_bytes(), b'MZold app')
+
+    def test_cleanup_retries_locked_helper(self):
+        job = self.stage()
+        (job.parent / 'result.json').write_text(json.dumps({'updated': '3.2.0'}))
+        with patch.object(Path, 'unlink', side_effect=PermissionError):
+            updater.cleanup_completed_updates(self.target)
+        self.assertTrue(job.exists())
+        updater.cleanup_completed_updates(self.target)
+        self.assertFalse(job.parent.exists())
+
     def test_invalid_metadata_and_insecure_urls_rejected(self):
         for field, value in [("version", "next"), ("url", "http://example.com/app.exe"),
                              ("url", "file:///app.exe"), ("size", -1), ("size", True),

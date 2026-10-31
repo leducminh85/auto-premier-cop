@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import gzip
 import os
 import shutil
 import subprocess
@@ -78,6 +79,10 @@ def main() -> None:
     config_path = build_root / "update_config.json"
     config = {"version": args.version, "manifest_url": args.update_url}
     config_path.write_text(json.dumps(config), encoding="utf-8")
+    # Keep the large probe compressed during one-file startup; unpack on first use.
+    packed_probe = build_root / (ffprobe.name + '.gz')
+    with ffprobe.open('rb') as source, gzip.open(packed_probe, 'wb', compresslevel=6) as packed:
+        shutil.copyfileobj(source, packed)
     command = [
         sys.executable,
         "-m",
@@ -98,8 +103,8 @@ def main() -> None:
         str(build_root / "pyinstaller"),
         "--specpath",
         str(build_root / "pyinstaller-spec"),
-        "--add-binary",
-        f"{ffprobe}{os.pathsep}.",
+        "--add-data",
+        f"{packed_probe}{os.pathsep}.",
         "--add-data",
         f"{LOGO_PATH}{os.pathsep}.",
         "--add-data",
