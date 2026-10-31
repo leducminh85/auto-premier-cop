@@ -1094,7 +1094,7 @@ class StructureReview(QFrame):
             flags = item.flags()
             if ready:
                 item.setFlags(flags | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(0, Qt.CheckState.Unchecked)
+                item.setCheckState(0, Qt.CheckState.Checked)
                 item.setForeground(5, QColor(THEME.success))
             else:
                 item.setFlags(flags & ~Qt.ItemFlag.ItemIsUserCheckable)
@@ -1230,7 +1230,9 @@ class ReviewPage(QWidget):
         self.voice_metric.setText(f"{voiceover_files} file voice-over")
         self.selection_label.setText(f"Đã chọn {selected}/{total}")
         self.select_all.blockSignals(True)
-        self.select_all.setChecked(bool(total and selected == total))
+        valid_count = sum(component_is_ready(component) for component in components)
+        self.select_all.setChecked(bool(valid_count and selected == valid_count))
+        self.select_all.setEnabled(bool(valid_count))
         self.select_all.blockSignals(False)
 
 
