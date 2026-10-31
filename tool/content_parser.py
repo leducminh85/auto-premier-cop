@@ -10,6 +10,26 @@ from docx.text.paragraph import Paragraph
 from generate_xml import GeneratorError
 
 
+class ContentParseError(GeneratorError):
+    """Actionable document diagnostic, preserved across the UI worker boundary."""
+    def __init__(self, path, location, text, reason, hint, fragment=''):
+        self.path = Path(path)
+        self.location = location
+        self.text = text
+        self.reason = reason
+        self.hint = hint
+        start = text.find(fragment) if fragment else -1
+        self.span = (start, start + len(fragment)) if start >= 0 else (0, len(text))
+        if start < 0 and fragment and ':' in fragment:
+            # Keep highlighting the original Word text after whitespace normalization.
+            pattern = r'\s*:\s*'.join(re.escape(part) for part in fragment.split(':'))
+            match = re.search(pattern, text)
+            if match:
+                self.span = match.span()
+        super().__init__(f'{reason}\nVị trí: {location}\nFile: {self.path}\n'
+                         f'Nội dung: {text}\nCách sửa: {hint}')
+
+
 def fold(text: str) -> str:
     text = unicodedata.normalize('NFKD', text.casefold()).replace('đ', 'd')
     return ' '.join(''.join(c for c in text if not unicodedata.combining(c)).split())
@@ -26,9 +46,12 @@ TEXT_HEADERS = {'content', 'script', 'noi dung', 'loi doc', 'narration'}
 
 
 def normalize_timecodes(text: str) -> str:
+    # Word often contains spaces (including NBSP/tabs) around timestamp colons.
+    # Only join numeric components; do not remove whitespace inside digit groups.
+    text = re.sub(r'(?<=\d)\s*:\s*(?=\d)', ':', fold(text))
     # Separate an explicit source label from its timestamp (Vid2:2:06).
     # Keep timestamp boundaries strict so malformed timestamps still fail.
-    return SOURCE_TIME_SEPARATOR.sub(r'\1: ', fold(text))
+    return SOURCE_TIME_SEPARATOR.sub(r'\1: ', text)
 
 
 @dataclass(frozen=True)
@@ -99,6 +122,11 @@ def read_content(path: Path) -> list[ContentEvent]:
     scenario = None
     seen_teasers = set()
     for label, paragraphs, location, standalone in rows(document):
+        original_label = label
+        text = ' '.join(paragraphs).strip()
+        def fail(reason, hint, fragment='', *, heading=False):
+            raise ContentParseError(path, location, original_label if heading and not standalone else text,
+                                    reason, hint, fragment)
         label = fold(label).strip(' :')
         body = ' '.join(paragraphs).strip()
         heading = fold(body).strip(' :') if standalone else label
@@ -113,7 +141,7 @@ def read_content(path: Path) -> list[ContentEvent]:
         elif match:
             scenario = int(match.group(1))
             if not 1 <= scenario <= 6:
-                raise GeneratorError(f'Số video {scenario} tại {location} không hợp lệ. Chỉ dùng số từ 1 đến 6.')
+                fail(f'Số video {scenario} nằm ngoài phạm vi hỗ trợ.', 'Dùng số từ 1 đến 6, đúng với video nguồn.', str(scenario), heading=True)
             section = f'th{scenario}'
             events.append(ContentEvent('section', section, location))
             if standalone:
@@ -128,7 +156,13 @@ def read_content(path: Path) -> list[ContentEvent]:
             ranges = list(RANGE.finditer(normalized))
             remainder = RANGE.sub('', normalized)
             if re.search(r'\d+:\d+\s*(?:[-–—−→]|to\b|den\b)', remainder):
-                raise GeneratorError(f'Không đọc được thời gian cắt tại {location}. Hãy ghi theo mẫu: “0:10 - 0:20”.')
+                fragment = next((part.strip() for part in text.split('+')
+                                 if re.search(r'\d+:\d+\s*(?:[-–—−→]|to\b|den\b)',
+                                              RANGE.sub('', normalize_timecodes(part)))), text)
+                fail('Không đọc được khoảng thời gian được đánh dấu.',
+                     'Ghi đủ mốc bắt đầu và kết thúc theo phút:giây hoặc giờ:phút:giây; '
+                     'phần giây phải có 2 chữ số. Ví dụ: 0:10 - 0:20. '
+                     'Dùng dấu + để nối nhiều đoạn. Đối chiếu mốc thực tế trong video.', fragment)
             if not ranges:
                 if section:
                     events.append(ContentEvent('audio', section, location, text))
@@ -144,15 +178,20 @@ def read_content(path: Path) -> list[ContentEvent]:
                 if explicit:
                     numbers = {int(s.group(1)) for s in explicit}
                     if len(numbers) != 1:
-                        raise GeneratorError(f'Có nhiều số video tại {location}. Hãy ghi rõ video cần dùng cho từng đoạn.')
+                        fail('Một đoạn cắt có nhiều số video nguồn.', 'Chỉ giữ một nhãn Vid cho mỗi đoạn. Ví dụ: Vid1: 0:10 - 0:20 + Vid2: 0:30 - 0:40.')
                     active_source = numbers.pop()
                 if active_source is None:
-                    raise GeneratorError(f'Chưa biết dùng video nào tại {location}. Hãy ghi thêm, ví dụ: “Vid1: 0:10 - 0:20”.')
+                    fail('Đoạn cắt chưa có video nguồn.', 'Thêm nhãn Vid trước mốc thời gian, đúng số video nguồn. Ví dụ: Vid1: 0:10 - 0:20.')
                 if not 1 <= active_source <= 6:
-                    raise GeneratorError(f'Số video {active_source} tại {location} không hợp lệ. Chỉ dùng số từ 1 đến 6.')
+                    fail(f'Số video {active_source} nằm ngoài phạm vi hỗ trợ.', 'Đổi nhãn Vid thành số từ 1 đến 6, đúng với video nguồn.')
+                for stamp in time_range.groups():
+                    if any(float(p) >= 60 for p in stamp.replace(',', '.').split(':')[1:]):
+                        fail(f'Mốc {stamp} có phần phút hoặc giây từ 60 trở lên.',
+                             'Phần giây và phần phút trong giờ:phút:giây phải nhỏ hơn 60. '
+                             'Ví dụ: 0:65 viết thành 1:05. Kiểm tra mốc đúng trong video.', stamp)
                 start, end = (seconds(stamp, location) for stamp in time_range.groups())
                 if end <= start:
-                    raise GeneratorError(invalid_time_message(location))
+                    fail('Mốc kết thúc không lớn hơn mốc bắt đầu.', 'Sửa mốc kết thúc để nằm sau mốc bắt đầu. Ví dụ: 0:10 - 0:20; đối chiếu video trước khi đổi.', next((part.strip() for part in text.split('+') if time_range.group() in normalize_timecodes(part)), text))
                 parsed.append(ContentEvent('video', section or 'intro', location, text, active_source, start, end))
                 previous_end = time_range.end()
             key = tuple((e.source, e.start, e.end) for e in parsed)

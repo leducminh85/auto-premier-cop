@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from docx import Document
-from content_parser import read_content
+from content_parser import read_content, ContentParseError
 from generate_xml import GeneratorError
 from generate_simple_xml import parse_ordered_script, parse_content_anchors
 from generate_simple_xml_v3 import inspect_docx_components, parse_docx_video_cuts
@@ -87,6 +87,36 @@ class ContentFormatsTests(unittest.TestCase):
         self.assertEqual([e.kind for e in es if e.kind != 'section'],
                          ['audio', 'video', 'audio', 'video', 'audio'])
 
+    def test_timestamp_whitespace_in_all_consumers(self):
+        for body in ['1:23-4:22', '1:23 -4:22', '1:23 - 4: 22',
+                     '1 : 23 - 4 : 22', '1:\u00a023\t-4:\u202f22',
+                     '00 : 01 : 23 - 00: 04: 22']:
+            for prefix in ['', 'Vid1:', 'Vid1: ']:
+                with self.subTest(body=body, prefix=prefix):
+                    text = prefix + body
+                    es = self.table([('Intro', 'Opening narration'), ('TH1', text)])
+                    cuts = [e for e in es if e.kind == 'video']
+                    self.assertEqual([(e.source, e.start, e.end) for e in cuts], [(1, 83, 262)])
+                    self.assertEqual(cuts[0].text, text)
+                    self.assertEqual(len(parse_docx_video_cuts(self.path)), 1)
+                    self.assertEqual(sum(c.video_cut_count for c in inspect_docx_components(self.path)), 1)
+                    self.assertEqual(len(parse_content_anchors(self.path, 60)[1]), 1)
+                    self.assertEqual(len(parse_ordered_script(self.path, 60)[0]), 2)
+        es = self.table([('Intro', 'Vid2:1: 34-2: 00 + Vid1:00: 02: 03,500-00: 02: 04,500')])
+        self.assertEqual([(e.source, e.start, e.end) for e in es if e.kind == 'video'],
+                         [(2, 94, 120), (1, 123.5, 124.5)])
+
+    def test_whitespace_does_not_hide_invalid_times(self):
+        for text in ['Vid1: 0: 65 - 1: 10', 'Vid1: 1: 20 - 1: 10',
+                     'Vid1: 0: 10 - broken', 'Vid7: 0: 10 - 0: 20',
+                     'Vid1: 0: 1 - 0: 20', 'Vid1: 0: 1 0 - 0: 20']:
+            with self.subTest(text=text), self.assertRaises(GeneratorError):
+                self.table([('Intro', text)])
+        with self.assertRaises(ContentParseError) as caught:
+            self.table([('Intro', 'Vid1: 0 : 65 - 1: 10')])
+        error = caught.exception
+        self.assertEqual(error.text[slice(*error.span)], '0 : 65')
+
     def test_header_columns_and_notes(self):
         es = self.table([('STT', 'Section', 'Content', 'Notes'),
                          ('1', 'Intro', 'Hello', 'Do not read'),
@@ -105,6 +135,22 @@ class ContentFormatsTests(unittest.TestCase):
                     self.table([('Intro', 'Hello'), ('Intro', text)])
                 with self.assertRaises(GeneratorError):
                     inspect_docx_components(self.path)
+
+    def test_diagnostics_preserve_original_and_identify_bad_segment(self):
+        for bad, highlighted in [('Vid1: 0:10 - broken', 'Vid1: 0:10 - broken'),
+                                 ('Vid1: 0:65 - 1:10', '0:65'),
+                                 ('Vid1: 0:20 - 0:10', 'Vid1: 0:20 - 0:10')]:
+            text = 'Vid2: 0:01 - 0:03 + ' + bad
+            with self.subTest(bad=bad):
+                with self.assertRaises(ContentParseError) as caught:
+                    self.table([('Intro', text)])
+                error = caught.exception
+                self.assertEqual(error.text, text)
+                self.assertEqual(error.location, 'bảng 1, dòng 1')
+                self.assertEqual(error.path, self.path)
+                self.assertEqual(text[slice(*error.span)], highlighted)
+                self.assertTrue(error.hint)
+                self.assertIn(text, str(error))
 
     def test_intentional_body_repeats_preserved(self):
         es = self.table([('TH1', '0:01 - 0:03'), ('Nội dung', 'Hello'),

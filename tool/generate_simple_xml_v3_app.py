@@ -78,6 +78,7 @@ from generate_simple_xml_v3 import (
 )
 from generate_xml import AUDIO_EXTENSIONS
 from update_ui import UpdateController
+from input_error_ui import InputErrorDialog
 
 
 @dataclass(frozen=True)
@@ -1532,7 +1533,7 @@ class ActionBar(QFrame):
 
 class WorkerSignals(QObject):
     succeeded = Signal(int, object)
-    failed = Signal(int, str)
+    failed = Signal(int, object)
 
 
 class Worker(QRunnable):
@@ -1549,7 +1550,7 @@ class Worker(QRunnable):
         except Exception as exc:
             traceback.print_exc()
             self.signals.failed.emit(
-                self.job_id, str(exc) or exc.__class__.__name__
+                self.job_id, exc
             )
         else:
             self.signals.succeeded.emit(self.job_id, result)
@@ -1711,7 +1712,7 @@ class XmlGeneratorApp(QMainWindow):
             success(result)
             self._finish_worker()
 
-        def failed(returned_id: int, message: str) -> None:
+        def failed(returned_id: int, message: object) -> None:
             if returned_id != self.active_job_id:
                 self.workers.pop(returned_id, None)
                 return
@@ -1732,7 +1733,8 @@ class XmlGeneratorApp(QMainWindow):
             return
         self._refresh_ui()
 
-    def _worker_failed(self, kind: str, message: str) -> None:
+    def _worker_failed(self, kind: str, error: object) -> None:
+        message = str(error)
         self.last_error = message
         self._log(f"LỖI: {message}", "error")
         if kind == "default_project":
@@ -1745,12 +1747,12 @@ class XmlGeneratorApp(QMainWindow):
             self.welcome_page.setNotice(message, error=True)
         elif kind == "review":
             self.stage = Stage.SETUP
-            self.setup_page.showNotice(message)
-            self._show_error_dialog("Không thể kiểm tra cấu trúc", message)
+            self.setup_page.showNotice(getattr(error, "reason", message))
+            self._show_error_dialog("Không thể kiểm tra cấu trúc", error)
         elif kind == "generation":
             self.stage = Stage.READY
-            self.setup_page.showNotice(f"Xuất XML thất bại: {message}")
-            self._show_error_dialog("Không thể xuất XML", message)
+            self.setup_page.showNotice(f"Xuất XML thất bại: {getattr(error, 'reason', message)}")
+            self._show_error_dialog("Không thể xuất XML", error)
 
     def _start_default_project_lookup(self) -> None:
         def lookup() -> object:
@@ -2373,8 +2375,8 @@ class XmlGeneratorApp(QMainWindow):
         if self.last_summary:
             self._copy_text(str(self.last_summary.output))
 
-    def _show_error_dialog(self, title: str, message: str) -> None:
-        QMessageBox.critical(self, title, message)
+    def _show_error_dialog(self, title: str, message: object) -> None:
+        InputErrorDialog(self, title, message).exec()
 
     def _escape(self) -> None:
         if self.log_panel.isVisible():
